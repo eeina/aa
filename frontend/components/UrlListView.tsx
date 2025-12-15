@@ -8,9 +8,7 @@ import {
   ChevronLeft, 
   ChevronRight, 
   ChevronsLeft, 
-  ChevronsRight,
-  Star,
-  MessageSquare
+  ChevronsRight 
 } from 'lucide-react';
 import { Card } from './Card';
 import { Button } from './Button';
@@ -20,8 +18,8 @@ interface UrlListViewProps {
   urls: SitemapUrlItem[];
   pagination: { page: number; total: number; pages: number; limit: number };
   statsTotal: number;
-  filterStatus: string;
-  setFilterStatus: (status: any) => void;
+  filterStatus: 'all' | 'pending' | 'copied';
+  setFilterStatus: (status: 'all' | 'pending' | 'copied') => void;
   searchTerm: string;
   setSearchTerm: (term: string) => void;
   onCopySingle: (item: SitemapUrlItem) => void;
@@ -81,43 +79,35 @@ export const UrlListView = ({
     );
   };
 
-  const tabs = [
-    { id: 'pending', label: 'Pending (Ready)' },
-    { id: 'unchecked', label: 'Unchecked' },
-    { id: 'copied', label: 'Copied' },
-    { id: 'rejected', label: 'Rejected' },
-    { id: 'all', label: 'All' }
-  ];
-
   return (
     <Card title="URL Database" icon={List} className="h-full">
       {/* Filter Bar */}
-      <div className="px-5 pb-4 mb-4 border-b border-gray-100 flex flex-col gap-4">
-        <div className="flex-1 relative w-full">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search URLs..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-          />
-        </div>
-        
-        <div className="flex bg-gray-100 p-1 rounded-lg w-full overflow-x-auto no-scrollbar">
-          {tabs.map(tab => (
+      <div className="px-5 pb-4 mb-4 border-b border-gray-100 flex flex-wrap gap-4 items-center">
+        <div className="flex bg-gray-100 p-1 rounded-lg">
+          {(['all', 'pending', 'copied'] as const).map(status => (
             <button
-              key={tab.id}
-              onClick={() => setFilterStatus(tab.id)}
-              className={`flex-1 whitespace-nowrap px-3 py-1.5 rounded-md text-xs font-semibold capitalize transition-all ${
-                filterStatus === tab.id 
+              key={status}
+              onClick={() => setFilterStatus(status)}
+              className={`px-4 py-1.5 rounded-md text-xs font-semibold capitalize transition-all ${
+                filterStatus === status 
                   ? 'bg-white text-indigo-600 shadow-sm' 
                   : 'text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab.label}
+              {status}
             </button>
           ))}
+        </div>
+
+        <div className="flex-1 relative min-w-[200px]">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="Filter URLs (e.g. recipe)"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-9 pr-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          />
         </div>
       </div>
 
@@ -129,14 +119,14 @@ export const UrlListView = ({
       {statsTotal === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-gray-400 gap-4">
           <PieChart size={48} />
-          <p>Database is empty. Import a sitemap to populate.</p>
+          <p>Database is empty. Enter a sitemap URL to populate.</p>
         </div>
       ) : (
         <>
           <div className="flex flex-col h-[500px] overflow-y-auto custom-scrollbar">
             {urls.length === 0 && (
                <div className="flex items-center justify-center h-40 text-gray-500 text-sm">
-                  No URLs match the current filter.
+                  No URLs match your current filters.
                </div>
             )}
             {urls.map((item, idx) => (
@@ -156,44 +146,15 @@ export const UrlListView = ({
                   >
                     {item.url} <ExternalLink size={10} className="text-gray-400" />
                   </a>
-                  
-                  {/* Metadata Row */}
-                  <div className="flex items-center gap-3 mt-1">
-                    <div className="text-[10px] text-gray-400 font-mono">
-                      {item.sourceDomain}
-                    </div>
-                    {/* Status Badge */}
-                    {item.qualityStatus === 'unchecked' && (
-                       <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Unchecked</span>
-                    )}
-                    {item.qualityStatus === 'rejected' && (
-                       <span className="text-[10px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded border border-red-100">Rejected</span>
-                    )}
-                    
-                    {/* Rating / Reviews */}
-                    {(item.qualityStatus === 'approved' || item.qualityStatus === 'rejected') && item.rating != null && (
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[10px] flex items-center gap-0.5 ${item.rating >= 4 ? 'text-amber-600' : 'text-gray-400'}`}>
-                           <Star size={10} fill={item.rating >= 4 ? "currentColor" : "none"} /> {item.rating.toFixed(1)}
-                        </span>
-                        <span className={`text-[10px] flex items-center gap-0.5 ${item.reviews && item.reviews >= 50 ? 'text-blue-600' : 'text-gray-400'}`}>
-                           <MessageSquare size={10} /> {item.reviews}
-                        </span>
-                      </div>
-                    )}
+                  <div className="text-[10px] text-gray-400 mt-0.5 truncate">
+                    {item.sourceDomain}
                   </div>
                 </div>
-                
                 <div className="shrink-0">
                   {item.copied ? (
                     <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2.5 py-1 rounded-full border border-emerald-200">Copied</span>
                   ) : (
-                    <Button 
-                      variant="ghost" 
-                      onClick={() => onCopySingle(item)} 
-                      className="!p-2 text-gray-400 hover:text-indigo-600"
-                      disabled={item.qualityStatus === 'rejected'}
-                    >
+                    <Button variant="ghost" onClick={() => onCopySingle(item)} className="!p-2 text-gray-400 hover:text-indigo-600">
                       <Copy size={16} />
                     </Button>
                   )}

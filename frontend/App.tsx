@@ -12,21 +12,20 @@ import { Notification } from './components/Notification';
 
 export default function App() {
   const [sitemapUrl, setSitemapUrl] = useState('');
-  const [extractionFilter, setExtractionFilter] = useState(''); 
+  const [extractionFilter, setExtractionFilter] = useState(''); // Import Pattern Filter
+  const [enableQualityFilter, setEnableQualityFilter] = useState(false); // Quality Content Filter
   const [loading, setLoading] = useState(false);
-  const [scanLoading, setScanLoading] = useState(false); // Scan state
-
   const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [showRawModal, setShowRawModal] = useState(false);
   
   // View Filters
-  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'copied' | 'unchecked' | 'rejected'>('pending');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'copied'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   
   // Pagination & Stats
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0, pages: 1 });
-  const [stats, setStats] = useState({ totalUrls: 0, unchecked: 0, pending: 0, rejected: 0, copied: 0 });
+  const [stats, setStats] = useState({ totalUrls: 0, pending: 0, copied: 0 });
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
@@ -55,6 +54,7 @@ export default function App() {
     }
   }, [filterStatus, searchTerm]);
 
+  // Initial load
   useEffect(() => {
     fetchUrls(1);
   }, [fetchUrls]);
@@ -65,68 +65,36 @@ export default function App() {
 
     setLoading(true);
     try {
+      showToast('Processing started. This may take a while if Quality Filter is on.', 'success');
+      
       const res = await fetch('http://localhost:5000/api/extract-sitemap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           sitemapUrl,
-          filterPattern: extractionFilter
+          filterPattern: extractionFilter,
+          enableQualityFilter // Pass the boolean flag
         }),
       });
       const data = await res.json();
       
       if (res.ok) {
-        showToast(`Imported ${data.newUrlsStored} new URLs (Total found: ${data.totalUrlsFound}). Status: Unchecked.`);
+        let msg = `Done! Found ${data.totalUrlsFound}. Stored ${data.newUrlsStored}.`;
+        if (data.skipped > 0) {
+          msg += ` Skipped ${data.skipped} (Pattern: ${data.details.patternSkipped}, Low Quality: ${data.details.qualitySkipped})`;
+        }
+        showToast(msg);
         setSitemapUrl('');
         setExtractionFilter('');
+        setEnableQualityFilter(false);
         await fetchUrls(1);
       } else {
-        showToast(data.error || 'Import failed', 'error');
+        showToast(data.error || 'Extraction failed', 'error');
       }
     } catch (err) {
-      showToast('Connection error.', 'error');
+      showToast('Connection error. Is backend running?', 'error');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleRunScan = async () => {
-    if (stats.unchecked === 0) return showToast('No unchecked URLs to scan.', 'error');
-    setScanLoading(true);
-    showToast('Starting quality scan...', 'success');
-
-    try {
-      let keepScanning = true;
-      let totalApproved = 0;
-      let totalRejected = 0;
-
-      // Simple loop to process batches
-      while (keepScanning) {
-        const res = await fetch('http://localhost:5000/api/scan-quality-batch', {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ limit: 10 })
-        });
-        const data = await res.json();
-        
-        if (data.processed > 0) {
-           totalApproved += data.approved;
-           totalRejected += data.rejected;
-           // Refresh list slightly to show progress if viewing pending/all
-           fetchUrls(pagination.page);
-        } else {
-           keepScanning = false;
-        }
-
-        if (data.remaining === 0) keepScanning = false;
-      }
-      
-      showToast(`Scan complete. Approved: ${totalApproved}, Rejected: ${totalRejected}`);
-    } catch (error) {
-      showToast('Scan interrupted due to error.', 'error');
-    } finally {
-      setScanLoading(false);
-      fetchUrls(1);
     }
   };
 
@@ -152,11 +120,15 @@ export default function App() {
       });
       fetchUrls(pagination.page);
     } catch (e) {
-       showToast('Failed to update status', 'error');
+       showToast('Failed to update status on server', 'error');
     }
   }
 
   const copyNextBatch = async (amount: number) => {
+    if (filterStatus === 'copied') {
+      return showToast('Switch to Pending or All to copy URLs.', 'error');
+    }
+
     setLoading(true);
     try {
       const queryParams = new URLSearchParams({
@@ -178,10 +150,10 @@ export default function App() {
           
           setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
           fetchUrls(pagination.page);
-          showToast(`Copied ${data.count} URLs!`);
+          showToast(`Copied next ${data.count} URLs!`);
         }
       } else {
-        showToast('No approved, pending URLs found.', 'error');
+        showToast('No uncopied URLs matching your filter.', 'error');
       }
     } catch (e) {
       showToast('Failed to fetch batch', 'error');
@@ -191,9 +163,13 @@ export default function App() {
   };
 
   const copyAllPending = async () => {
+    if (filterStatus === 'copied') return;
+
     setLoading(true);
     try {
-      const queryParams = new URLSearchParams({ search: searchTerm });
+      const queryParams = new URLSearchParams({
+        search: searchTerm
+      });
       const res = await fetch(`http://localhost:5000/api/urls/pending?${queryParams}`);
       const data = await res.json();
       
@@ -204,19 +180,18 @@ export default function App() {
           showToast(`Copied ${data.count} URLs!`);
         }
       } else {
-        showToast('No pending URLs to copy', 'error');
+        showToast('No URLs to copy', 'error');
       }
     } catch (e) {
-      showToast('Failed to fetch list', 'error');
+      showToast('Failed to fetch pending list', 'error');
     } finally {
       setLoading(false);
     }
   };
 
   const copyPagePending = async () => {
-    // Pending means visible on page AND not copied AND approved
-    const pagePending = urls.filter(u => !u.copied && u.qualityStatus === 'approved');
-    if (pagePending.length === 0) return showToast('No approved pending URLs on this page.', 'error');
+    const pagePending = urls.filter(u => !u.copied);
+    if (pagePending.length === 0) return showToast('No pending URLs on this page.', 'error');
 
     const text = pagePending.map(u => u.url).join('\n');
     const success = await copyBatchText(text);
@@ -227,8 +202,10 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ urls: pagePending.map(u => u.url) }),
         });
+        
+        setUrls(prev => prev.map(u => ({ ...u, copied: true })));
         fetchUrls(pagination.page);
-        showToast(`Copied ${pagePending.length} URLs!`);
+        showToast(`Copied ${pagePending.length} URLs from this page!`);
       } catch (e) {
          showToast('Failed to update status', 'error');
       }
@@ -244,7 +221,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ urls: [item.url] }),
         });
-        fetchUrls(pagination.page);
+        setUrls(prev => prev.map(u => u._id === item._id ? { ...u, copied: true } : u));
         showToast('URL copied!');
       } catch (err) {
         showToast('Failed to update status', 'error');
@@ -253,17 +230,20 @@ export default function App() {
   };
 
   const handleClearDatabase = async () => {
-    if (!window.confirm("Delete ALL data?")) return;
+    if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) return;
+
     try {
       const res = await fetch('http://localhost:5000/api/clear-database', { method: 'POST' });
       if (res.ok) {
         setUrls([]);
-        setStats({ totalUrls: 0, unchecked: 0, pending: 0, rejected: 0, copied: 0 });
+        setStats({ totalUrls: 0, pending: 0, copied: 0 });
         setPagination({ page: 1, limit: 50, total: 0, pages: 1 });
-        showToast('Database cleared.');
+        showToast('Database cleared successfully.');
+      } else {
+        showToast('Failed to clear database.', 'error');
       }
     } catch (e) {
-      showToast('Error.', 'error');
+      showToast('Error connecting to server.', 'error');
     }
   };
 
@@ -286,6 +266,8 @@ export default function App() {
             setSitemapUrl={setSitemapUrl}
             filterPattern={extractionFilter}
             setFilterPattern={setExtractionFilter}
+            enableQualityFilter={enableQualityFilter}
+            setEnableQualityFilter={setEnableQualityFilter}
             loading={loading} 
             onExtract={handleExtract} 
           />
@@ -294,7 +276,6 @@ export default function App() {
             <>
               <ActionPanel 
                 loading={loading}
-                scanLoading={scanLoading}
                 stats={stats}
                 filterStatus={filterStatus}
                 searchTerm={searchTerm}
@@ -303,8 +284,7 @@ export default function App() {
                 onCopyPagePending={copyPagePending}
                 onShowRaw={() => setShowRawModal(true)}
                 onClearDatabase={handleClearDatabase}
-                onRunScan={handleRunScan}
-                pageHasPending={urls.some(u => !u.copied && u.qualityStatus === 'approved')}
+                pageHasPending={urls.some(u => !u.copied)}
               />
               <StatsOverview stats={stats} />
             </>
