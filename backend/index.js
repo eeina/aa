@@ -3,6 +3,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
+import * as cheerio from 'cheerio';
 import zlib from 'zlib';
 import cors from 'cors';
 
@@ -47,7 +48,8 @@ async function fetchContent(url) {
       headers: {
         'User-Agent': 'SitemapExtractorBot/1.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
+      },
+      timeout: 10000 // 10s timeout per request
     });
     const contentType = response.headers['content-type'];
     const contentEncoding = response.headers['content-encoding'];
@@ -64,8 +66,43 @@ async function fetchContent(url) {
     }
     return data.toString('utf8');
   } catch (error) {
-    console.error(`Error fetching content from ${url}:`, error.message);
+    // console.error(`Error fetching content from ${url}:`, error.message);
     throw new Error(`Failed to fetch content from ${url}`);
+  }
+}
+
+/**
+ * Checks if a URL meets the quality criteria: Rating >= 4.0 and Reviews >= 50
+ * @param {string} url 
+ * @returns {Promise<boolean>}
+ */
+async function checkUrlQuality(url) {
+  try {
+    const html = await fetchContent(url);
+    const $ = cheerio.load(html);
+
+    // Selectors based on provided HTML:
+    // Rating class: .mm-recipes-review-bar__rating
+    // Review count class: .mm-recipes-review-bar__comment-count
+    
+    const ratingText = $('.mm-recipes-review-bar__rating').first().text().trim();
+    const reviewText = $('.mm-recipes-review-bar__comment-count').first().text().trim();
+
+    // Parse Rating (e.g. "5.0")
+    const rating = parseFloat(ratingText);
+
+    // Parse Reviews (e.g. "6 Reviews" -> 6)
+    const reviews = parseInt(reviewText.replace(/[^0-9]/g, ''), 10);
+
+    // Criteria: Rating >= 4.0 AND Reviews >= 50
+    if (!isNaN(rating) && !isNaN(reviews) && rating >= 4.0 && reviews >= 50) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // If we can't fetch or parse, we assume it doesn't meet criteria (or is broken)
+    return false;
   }
 }
 
@@ -111,7 +148,7 @@ async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
 
 // 1. Extract URLs from a specific Sitemap XML
 app.post('/api/extract-sitemap', async (req, res) => {
-  const { sitemapUrl } = req.body;
+  const { sitemapUrl, filterPattern, enableQualityFilter } = req.body;
 
   if (!sitemapUrl) {
     return res.status(400).json({ error: 'Sitemap URL is required' });
@@ -127,21 +164,63 @@ app.post('/api/extract-sitemap', async (req, res) => {
   const allFoundUrls = new Set();
 
   try {
-    // Directly process the provided sitemap URL
+    // 1. Extract all URLs from sitemap structure first
     await extractUrlsFromSitemap(sitemapUrl, allFoundUrls);
 
     if (allFoundUrls.size === 0) {
       return res.status(404).json({ error: 'No URLs found in the provided sitemap.' });
     }
 
-    // Store new URLs in MongoDB
+    // 2. Filter Process
     const newUrlsToStore = [];
-    for (const uniqueUrl of allFoundUrls) {
-      newUrlsToStore.push({
-        url: uniqueUrl,
-        sourceDomain: websiteDomain,
-        copied: false
+    let patternSkippedCount = 0;
+    let qualitySkippedCount = 0;
+
+    // Convert Set to Array for processing
+    const candidates = Array.from(allFoundUrls);
+
+    // We process sequentially or in small batches to check quality if enabled
+    // because checking 1000 URLs at once will crash/timeout.
+    
+    // Batch size for quality check
+    const BATCH_SIZE = 10; 
+    
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      
+      const batchPromises = batch.map(async (uniqueUrl) => {
+        // A. Basic Pattern Filter
+        if (filterPattern && filterPattern.trim() !== '' && !uniqueUrl.includes(filterPattern)) {
+          return { status: 'pattern_skipped', url: uniqueUrl };
+        }
+
+        // B. Content Quality Filter (Optional)
+        if (enableQualityFilter) {
+          const meetsQuality = await checkUrlQuality(uniqueUrl);
+          if (!meetsQuality) {
+            return { status: 'quality_skipped', url: uniqueUrl };
+          }
+        }
+
+        // C. Success
+        return { status: 'keep', url: uniqueUrl };
       });
+
+      const results = await Promise.all(batchPromises);
+
+      for (const res of results) {
+        if (res.status === 'keep') {
+          newUrlsToStore.push({
+            url: res.url,
+            sourceDomain: websiteDomain,
+            copied: false
+          });
+        } else if (res.status === 'pattern_skipped') {
+          patternSkippedCount++;
+        } else if (res.status === 'quality_skipped') {
+          qualitySkippedCount++;
+        }
+      }
     }
 
     let newUrlsStoredCount = 0;
@@ -160,9 +239,14 @@ app.post('/api/extract-sitemap', async (req, res) => {
     }
 
     res.status(200).json({
-      message: `Processed sitemap. Found ${allFoundUrls.size} URLs.`,
+      message: `Processed. Found ${allFoundUrls.size}. Stored ${newUrlsStoredCount}.`,
       newUrlsStored: newUrlsStoredCount,
       totalUrlsFound: allFoundUrls.size,
+      skipped: patternSkippedCount + qualitySkippedCount,
+      details: {
+        patternSkipped: patternSkippedCount,
+        qualitySkipped: qualitySkippedCount
+      },
       domain: websiteDomain
     });
 

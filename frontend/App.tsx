@@ -1,39 +1,25 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { 
-  Link, 
-  Copy, 
-  CheckCircle, 
-  AlertCircle, 
-  RefreshCw, 
-  List, 
-  ExternalLink,
-  PieChart,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
-  Trash2,
-  FileText,
-  X,
-  ClipboardList,
-  Search
-} from 'lucide-react';
-
 import { SitemapUrlItem } from './types';
-import { styles } from './styles';
-import { Button } from './components/Button';
-import { Card } from './components/Card';
-import { StatBox } from './components/StatBox';
+
+// Components
+import { Header } from './components/Header';
+import { SitemapInput } from './components/SitemapInput';
+import { StatsOverview } from './components/StatsOverview';
+import { ActionPanel } from './components/ActionPanel';
+import { UrlListView } from './components/UrlListView';
+import { RawModal } from './components/RawModal';
 import { Notification } from './components/Notification';
 
 export default function App() {
   const [sitemapUrl, setSitemapUrl] = useState('');
+  const [extractionFilter, setExtractionFilter] = useState(''); // Import Pattern Filter
+  const [enableQualityFilter, setEnableQualityFilter] = useState(false); // Quality Content Filter
   const [loading, setLoading] = useState(false);
-  const [urls, setUrls] = useState<SitemapUrlItem[]>([]); // Current Page URLs
+  const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [showRawModal, setShowRawModal] = useState(false);
   
-  // Filters
+  // View Filters
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'copied'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   
@@ -68,7 +54,7 @@ export default function App() {
     }
   }, [filterStatus, searchTerm]);
 
-  // Debounced Search Effect or just Effect on filter change
+  // Initial load
   useEffect(() => {
     fetchUrls(1);
   }, [fetchUrls]);
@@ -79,16 +65,28 @@ export default function App() {
 
     setLoading(true);
     try {
+      showToast('Processing started. This may take a while if Quality Filter is on.', 'success');
+      
       const res = await fetch('http://localhost:5000/api/extract-sitemap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sitemapUrl }),
+        body: JSON.stringify({ 
+          sitemapUrl,
+          filterPattern: extractionFilter,
+          enableQualityFilter // Pass the boolean flag
+        }),
       });
       const data = await res.json();
       
       if (res.ok) {
-        showToast(`Successfully processed. Found ${data.totalUrlsFound} URLs.`);
+        let msg = `Done! Found ${data.totalUrlsFound}. Stored ${data.newUrlsStored}.`;
+        if (data.skipped > 0) {
+          msg += ` Skipped ${data.skipped} (Pattern: ${data.details.patternSkipped}, Low Quality: ${data.details.qualitySkipped})`;
+        }
+        showToast(msg);
         setSitemapUrl('');
+        setExtractionFilter('');
+        setEnableQualityFilter(false);
         await fetchUrls(1);
       } else {
         showToast(data.error || 'Extraction failed', 'error');
@@ -117,19 +115,16 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           allPending: true,
-          search: searchTerm // Respect search filter when marking all
+          search: searchTerm
         }),
       });
-      // Refresh view
       fetchUrls(pagination.page);
     } catch (e) {
        showToast('Failed to update status on server', 'error');
     }
   }
 
-  // Copy specific next N pending URLs (respecting current search filter)
   const copyNextBatch = async (amount: number) => {
-    // If filtering by copied, we can't copy pending!
     if (filterStatus === 'copied') {
       return showToast('Switch to Pending or All to copy URLs.', 'error');
     }
@@ -153,12 +148,8 @@ export default function App() {
             body: JSON.stringify({ urls: data.urls }),
           });
           
-          // Optimistic Update
           setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
-          
-          // Refetch stats to be accurate
           fetchUrls(pagination.page);
-          
           showToast(`Copied next ${data.count} URLs!`);
         }
       } else {
@@ -171,7 +162,6 @@ export default function App() {
     }
   };
 
-  // Copy ALL pending (respecting filter)
   const copyAllPending = async () => {
     if (filterStatus === 'copied') return;
 
@@ -199,7 +189,6 @@ export default function App() {
     }
   };
 
-  // Copy current page items
   const copyPagePending = async () => {
     const pagePending = urls.filter(u => !u.copied);
     if (pagePending.length === 0) return showToast('No pending URLs on this page.', 'error');
@@ -215,7 +204,7 @@ export default function App() {
         });
         
         setUrls(prev => prev.map(u => ({ ...u, copied: true })));
-        fetchUrls(pagination.page); // Refresh stats
+        fetchUrls(pagination.page);
         showToast(`Copied ${pagePending.length} URLs from this page!`);
       } catch (e) {
          showToast('Failed to update status', 'error');
@@ -241,14 +230,10 @@ export default function App() {
   };
 
   const handleClearDatabase = async () => {
-    if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) {
-      return;
-    }
+    if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) return;
 
     try {
-      const res = await fetch('http://localhost:5000/api/clear-database', {
-        method: 'POST'
-      });
+      const res = await fetch('http://localhost:5000/api/clear-database', { method: 'POST' });
       if (res.ok) {
         setUrls([]);
         setStats({ totalUrls: 0, pending: 0, copied: 0 });
@@ -265,281 +250,75 @@ export default function App() {
   const handlePageChange = (newPage: number) => {
     if (newPage >= 1 && newPage <= pagination.pages) {
       fetchUrls(newPage);
-      const listContainer = document.getElementById('url-list-container');
-      if (listContainer) listContainer.scrollTop = 0;
     }
   };
 
   return (
-    <div style={styles.container}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div style={styles.logo}>
-          <div style={styles.logoIcon}><Link size={24} color="white" /></div>
-          <h1>Sitemap Manager</h1>
-        </div>
-      </header>
+    <div className="min-h-screen bg-gray-100 flex flex-col font-sans">
+      <Header />
 
-      {/* Main Content */}
-      <main style={styles.mainGrid}>
+      <main className="flex-1 w-full max-w-[1400px] mx-auto p-6 grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6">
         
-        {/* Left Column: Input & Actions */}
-        <div style={styles.column}>
-          <Card title="Extract Sitemap" icon={RefreshCw}>
-            <form onSubmit={handleExtract} style={styles.form}>
-              <div style={styles.inputWrapper}>
-                <input
-                  type="url"
-                  placeholder="https://example.com/sitemap.xml"
-                  value={sitemapUrl}
-                  onChange={e => setSitemapUrl(e.target.value)}
-                  style={styles.input}
-                  required
-                />
-              </div>
-              <Button type="submit" disabled={loading} fullWidth icon={loading ? RefreshCw : Link}>
-                {loading ? 'Processing...' : 'Load Sitemap'}
-              </Button>
-            </form>
-          </Card>
+        {/* Left Sidebar */}
+        <div className="flex flex-col gap-6">
+          <SitemapInput 
+            sitemapUrl={sitemapUrl} 
+            setSitemapUrl={setSitemapUrl}
+            filterPattern={extractionFilter}
+            setFilterPattern={setExtractionFilter}
+            enableQualityFilter={enableQualityFilter}
+            setEnableQualityFilter={setEnableQualityFilter}
+            loading={loading} 
+            onExtract={handleExtract} 
+          />
 
           {stats.totalUrls > 0 && (
-            <Card title="Quick Actions" icon={Copy}>
-              <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
-                <Button 
-                  variant="primary" 
-                  onClick={() => copyNextBatch(10)} 
-                  disabled={loading || (filterStatus === 'copied')} 
-                  fullWidth 
-                  icon={ClipboardList}
-                >
-                  Copy Next 10 Pending {searchTerm ? '(Filtered)' : ''}
-                </Button>
-
-                <Button 
-                  variant="success" 
-                  onClick={copyAllPending} 
-                  disabled={loading || (filterStatus === 'copied')} 
-                  fullWidth 
-                  icon={Copy}
-                >
-                  {loading ? 'Processing...' : `Copy All Pending ${searchTerm ? '(Filtered)' : ''}`}
-                </Button>
-                
-                <Button 
-                  variant="secondary" 
-                  onClick={copyPagePending} 
-                  disabled={urls.filter(u => !u.copied).length === 0} 
-                  fullWidth 
-                  icon={Copy}
-                >
-                  Copy This Page
-                </Button>
-
-                <Button 
-                  variant="outline" 
-                  onClick={() => setShowRawModal(true)} 
-                  fullWidth 
-                  icon={FileText}
-                >
-                  View Page Raw List
-                </Button>
-
-                <div style={styles.progressContainer}>
-                  <div style={styles.progressLabel}>
-                    <span>Progress (Total DB)</span>
-                    <span>{stats.totalUrls > 0 ? Math.round((stats.copied / stats.totalUrls) * 100) : 0}%</span>
-                  </div>
-                  <div style={styles.progressBarBg}>
-                    <div style={{...styles.progressBarFill, width: `${stats.totalUrls > 0 ? (stats.copied / stats.totalUrls) * 100 : 0}%`}}></div>
-                  </div>
-                </div>
-              </div>
-            </Card>
-          )}
-
-          {/* Database Management */}
-          <Card title="Management" icon={Trash2}>
-             <Button variant="danger" onClick={handleClearDatabase} fullWidth icon={Trash2}>
-                Clear Full Database
-             </Button>
-          </Card>
-
-          {/* Stats */}
-          {stats.totalUrls > 0 && (
-            <div style={styles.statsGrid}>
-              <StatBox label="Total URLs" value={stats.totalUrls} color="#4f46e5" icon={List} />
-              <StatBox label="Pending" value={stats.pending} color="#f59e0b" icon={AlertCircle} />
-              <StatBox label="Done" value={stats.copied} color="#10b981" icon={CheckCircle} />
-            </div>
+            <>
+              <ActionPanel 
+                loading={loading}
+                stats={stats}
+                filterStatus={filterStatus}
+                searchTerm={searchTerm}
+                onCopyNextBatch={copyNextBatch}
+                onCopyAllPending={copyAllPending}
+                onCopyPagePending={copyPagePending}
+                onShowRaw={() => setShowRawModal(true)}
+                onClearDatabase={handleClearDatabase}
+                pageHasPending={urls.some(u => !u.copied)}
+              />
+              <StatsOverview stats={stats} />
+            </>
           )}
         </div>
 
-        {/* Right Column: List */}
-        <div style={styles.columnWide}>
+        {/* Right Content */}
+        <div className="flex flex-col gap-4 min-w-0">
           <Notification message={toast.msg} type={toast.type} />
           
-          <Card title="URL Database" icon={List}>
-            {/* Filter Bar */}
-            <div style={{padding: '0 20px'}}>
-              <div style={styles.filterBar}>
-                {/* Status Tabs */}
-                <div style={styles.tabs}>
-                  {(['all', 'pending', 'copied'] as const).map(status => (
-                    <button
-                      key={status}
-                      onClick={() => setFilterStatus(status)}
-                      style={{
-                        ...styles.tab,
-                        ...(filterStatus === status ? styles.activeTab : styles.inactiveTab)
-                      }}
-                    >
-                      {status.charAt(0).toUpperCase() + status.slice(1)}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Search Input */}
-                <div style={styles.searchContainer}>
-                  <Search size={16} style={styles.searchIcon} />
-                  <input
-                    type="text"
-                    placeholder="Filter URLs (e.g. recipe)"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    style={styles.searchInput}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div style={{...styles.cardHeader, borderTop: '1px solid #f3f4f6', paddingTop: '10px'}}>
-               <div style={{fontSize: '0.85rem', color: '#6b7280'}}>
-                Showing {pagination.total} result{pagination.total !== 1 ? 's' : ''} • Page {pagination.page} of {pagination.pages || 1}
-              </div>
-            </div>
-
-            {/* List */}
-            {stats.totalUrls === 0 ? (
-              <div style={styles.emptyState}>
-                <PieChart size={48} color="#d1d5db" />
-                <p>Database is empty. Enter a sitemap URL to populate.</p>
-              </div>
-            ) : (
-              <>
-                <div id="url-list-container" style={styles.list}>
-                  {urls.length === 0 && (
-                     <div style={styles.emptyState}>
-                        <p>No URLs match your current filters.</p>
-                     </div>
-                  )}
-                  {urls.map((item, idx) => (
-                    <div key={item._id} style={{
-                      ...styles.listItem,
-                      opacity: item.copied ? 0.6 : 1,
-                      backgroundColor: item.copied ? '#f9fafb' : 'white',
-                    }}>
-                      <div style={styles.listIndex}>#{((pagination.page - 1) * pagination.limit) + idx + 1}</div>
-                      <div style={styles.listContent}>
-                        <a 
-                          href={item.url} 
-                          target="_blank" 
-                          rel="noreferrer" 
-                          style={styles.link}
-                          title={item.url}
-                        >
-                          {item.url} <ExternalLink size={12} />
-                        </a>
-                        <div style={{fontSize: '0.75rem', color: '#9ca3af', marginTop: '2px'}}>
-                          {item.sourceDomain}
-                        </div>
-                      </div>
-                      <div style={styles.listActions}>
-                        {item.copied ? (
-                          <span style={styles.badgeSuccess}>Copied</span>
-                        ) : (
-                          <Button variant="ghost" onClick={() => copySingle(item)}>
-                            <Copy size={16} />
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                
-                {/* Pagination Controls */}
-                {pagination.pages > 1 && (
-                  <div style={styles.paginationContainer}>
-                    <button 
-                      style={styles.pageBtn} 
-                      disabled={pagination.page === 1}
-                      onClick={() => handlePageChange(1)}
-                    >
-                      <ChevronsLeft size={18} />
-                    </button>
-                    <button 
-                      style={styles.pageBtn} 
-                      disabled={pagination.page === 1}
-                      onClick={() => handlePageChange(pagination.page - 1)}
-                    >
-                      <ChevronLeft size={18} />
-                    </button>
-                    
-                    <span style={styles.pageInfo}>
-                      Page <strong>{pagination.page}</strong> of {pagination.pages}
-                    </span>
-
-                    <button 
-                      style={styles.pageBtn} 
-                      disabled={pagination.page === pagination.pages}
-                      onClick={() => handlePageChange(pagination.page + 1)}
-                    >
-                      <ChevronRight size={18} />
-                    </button>
-                    <button 
-                      style={styles.pageBtn} 
-                      disabled={pagination.page === pagination.pages}
-                      onClick={() => handlePageChange(pagination.pages)}
-                    >
-                      <ChevronsRight size={18} />
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-          </Card>
+          <UrlListView 
+            urls={urls}
+            pagination={pagination}
+            statsTotal={stats.totalUrls}
+            filterStatus={filterStatus}
+            setFilterStatus={setFilterStatus}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            onCopySingle={copySingle}
+            onPageChange={handlePageChange}
+          />
         </div>
 
       </main>
 
-      {/* Raw Data Modal */}
-      {showRawModal && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modalContent}>
-            <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>Raw List (Current Page)</h3>
-              <Button variant="ghost" onClick={() => setShowRawModal(false)}>
-                <X size={20} />
-              </Button>
-            </div>
-            <textarea
-              readOnly
-              value={urls.map(u => u.url).join('\n')}
-              style={styles.rawTextarea}
-              onClick={(e) => e.currentTarget.select()}
-            />
-            <div style={styles.modalActions}>
-              <Button variant="outline" onClick={() => setShowRawModal(false)}>
-                Close
-              </Button>
-              <Button onClick={() => copyBatchText(urls.map(u => u.url).join('\n')).then(() => showToast('Page copied!'))}>
-                Copy Page
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
+      <RawModal 
+        show={showRawModal} 
+        onClose={() => setShowRawModal(false)} 
+        urls={urls}
+        onCopy={async (text) => {
+          const success = await copyBatchText(text);
+          if(success) showToast('Page copied!');
+        }}
+      />
     </div>
   );
 }
