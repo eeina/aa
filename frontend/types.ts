@@ -3,4 +3,7 @@ export interface SitemapUrlItem {
   url: string;
   copied: boolean;
   sourceDomain: string;
+  qualityStatus: 'unchecked' | 'approved' | 'rejected';
+  rating?: number;
+  reviews?: number;
 }

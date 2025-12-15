@@ -8,15 +8,12 @@ import zlib from 'zlib';
 import cors from 'cors';
 
 const app = express();
-const port = 5000; // Changed to 5000 to avoid conflict with Frontend (Vite)
+const port = 5000;
 
-app.use(cors()); // Enable CORS for all routes
-app.use(express.json()); // For parsing application/json requests
+app.use(cors());
+app.use(express.json());
 
-// --- MongoDB Connection ---
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sitemap_db';
-
-// Log the connection attempt (masking password for security)
 const maskedUri = MONGODB_URI.replace(/:([^:@]+)@/, ':****@');
 console.log(`Attempting to connect to MongoDB at: ${maskedUri}`);
 
@@ -24,23 +21,22 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('Could not connect to MongoDB:', err));
 
-// --- Mongoose Schema and Model ---
+// --- Mongoose Schema ---
 const sitemapUrlSchema = new mongoose.Schema({
   url: { type: String, required: true, unique: true },
   sourceDomain: { type: String, required: true },
   extractedAt: { type: Date, default: Date.now },
-  copied: { type: Boolean, default: false } // Track if the user has copied this URL
+  copied: { type: Boolean, default: false },
+  // Status flow: 'unchecked' -> 'approved' (Pending) OR 'rejected'
+  qualityStatus: { type: String, enum: ['unchecked', 'approved', 'rejected'], default: 'unchecked' },
+  rating: { type: Number },
+  reviews: { type: Number }
 });
 
 const SitemapUrl = mongoose.model('SitemapUrl', sitemapUrlSchema);
 
-// --- Helper Functions for Sitemap Processing ---
+// --- Helpers ---
 
-/**
- * Fetches content from a URL, handling gzipped responses and setting User-Agent.
- * @param {string} url
- * @returns {Promise<string>}
- */
 async function fetchContent(url) {
   try {
     const response = await axios.get(url, {
@@ -49,13 +45,11 @@ async function fetchContent(url) {
         'User-Agent': 'SitemapExtractorBot/1.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
-      timeout: 10000 // 10s timeout per request
+      timeout: 10000 
     });
     const contentType = response.headers['content-type'];
     const contentEncoding = response.headers['content-encoding'];
-
     let data = response.data;
-
     if (contentEncoding === 'gzip' || contentType?.includes('application/x-gzip')) {
       data = await new Promise((resolve, reject) => {
         zlib.gunzip(data, (err, dezipped) => {
@@ -66,60 +60,36 @@ async function fetchContent(url) {
     }
     return data.toString('utf8');
   } catch (error) {
-    // console.error(`Error fetching content from ${url}:`, error.message);
     throw new Error(`Failed to fetch content from ${url}`);
   }
 }
 
-/**
- * Checks if a URL meets the quality criteria: Rating >= 4.0 and Reviews >= 50
- * @param {string} url 
- * @returns {Promise<boolean>}
- */
 async function checkUrlQuality(url) {
   try {
     const html = await fetchContent(url);
     const $ = cheerio.load(html);
 
-    // Selectors based on provided HTML:
-    // Rating class: .mm-recipes-review-bar__rating
-    // Review count class: .mm-recipes-review-bar__comment-count
-    
+    // Selectors matching user provided HTML
     const ratingText = $('.mm-recipes-review-bar__rating').first().text().trim();
     const reviewText = $('.mm-recipes-review-bar__comment-count').first().text().trim();
 
-    // Parse Rating (e.g. "5.0")
     const rating = parseFloat(ratingText);
-
-    // Parse Reviews (e.g. "6 Reviews" -> 6)
     const reviews = parseInt(reviewText.replace(/[^0-9]/g, ''), 10);
 
-    // Criteria: Rating >= 4.0 AND Reviews >= 50
-    if (!isNaN(rating) && !isNaN(reviews) && rating >= 4.0 && reviews >= 50) {
-      return true;
-    }
-
-    return false;
+    const valid = !isNaN(rating) && !isNaN(reviews) && rating >= 4.0 && reviews >= 50;
+    
+    return { valid, rating, reviews };
   } catch (error) {
-    // If we can't fetch or parse, we assume it doesn't meet criteria (or is broken)
-    return false;
+    return { valid: false, rating: 0, reviews: 0 };
   }
 }
 
-/**
- * Recursively extracts all URLs from a sitemap (or sitemap index).
- * @param {string} sitemapUrl
- * @param {Set<string>} extractedUrlsSet - A set to keep track of already extracted URLs to avoid duplicates.
- * @returns {Promise<string[]>}
- */
 async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
   try {
     const xmlContent = await fetchContent(sitemapUrl);
     const result = await parseStringPromise(xmlContent);
-
     const urls = [];
 
-    // Check if it's a sitemap index file
     if (result.sitemapindex && result.sitemapindex.sitemap) {
       for (const sitemapEntry of result.sitemapindex.sitemap) {
         const nestedSitemapUrl = sitemapEntry.loc?.[0];
@@ -128,7 +98,7 @@ async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
           urls.push(...nestedUrls);
         }
       }
-    } else if (result.urlset && result.urlset.url) { // Otherwise, it's a regular sitemap
+    } else if (result.urlset && result.urlset.url) {
       for (const urlEntry of result.urlset.url) {
         const loc = urlEntry.loc?.[0];
         if (loc && !extractedUrlsSet.has(loc)) {
@@ -140,19 +110,17 @@ async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
     return urls;
   } catch (error) {
     console.error(`Error processing sitemap ${sitemapUrl}:`, error.message);
-    return []; // Return empty array on error for this sitemap
+    return [];
   }
 }
 
-// --- API Endpoints ---
+// --- Endpoints ---
 
-// 1. Extract URLs from a specific Sitemap XML
+// 1. Extract (No quality check here, just storage)
 app.post('/api/extract-sitemap', async (req, res) => {
-  const { sitemapUrl, filterPattern, enableQualityFilter } = req.body;
+  const { sitemapUrl, filterPattern } = req.body;
 
-  if (!sitemapUrl) {
-    return res.status(400).json({ error: 'Sitemap URL is required' });
-  }
+  if (!sitemapUrl) return res.status(400).json({ error: 'Sitemap URL is required' });
 
   let websiteDomain;
   try {
@@ -164,63 +132,26 @@ app.post('/api/extract-sitemap', async (req, res) => {
   const allFoundUrls = new Set();
 
   try {
-    // 1. Extract all URLs from sitemap structure first
     await extractUrlsFromSitemap(sitemapUrl, allFoundUrls);
 
     if (allFoundUrls.size === 0) {
       return res.status(404).json({ error: 'No URLs found in the provided sitemap.' });
     }
 
-    // 2. Filter Process
     const newUrlsToStore = [];
     let patternSkippedCount = 0;
-    let qualitySkippedCount = 0;
 
-    // Convert Set to Array for processing
-    const candidates = Array.from(allFoundUrls);
-
-    // We process sequentially or in small batches to check quality if enabled
-    // because checking 1000 URLs at once will crash/timeout.
-    
-    // Batch size for quality check
-    const BATCH_SIZE = 10; 
-    
-    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
-      const batch = candidates.slice(i, i + BATCH_SIZE);
-      
-      const batchPromises = batch.map(async (uniqueUrl) => {
-        // A. Basic Pattern Filter
-        if (filterPattern && filterPattern.trim() !== '' && !uniqueUrl.includes(filterPattern)) {
-          return { status: 'pattern_skipped', url: uniqueUrl };
-        }
-
-        // B. Content Quality Filter (Optional)
-        if (enableQualityFilter) {
-          const meetsQuality = await checkUrlQuality(uniqueUrl);
-          if (!meetsQuality) {
-            return { status: 'quality_skipped', url: uniqueUrl };
-          }
-        }
-
-        // C. Success
-        return { status: 'keep', url: uniqueUrl };
-      });
-
-      const results = await Promise.all(batchPromises);
-
-      for (const res of results) {
-        if (res.status === 'keep') {
-          newUrlsToStore.push({
-            url: res.url,
-            sourceDomain: websiteDomain,
-            copied: false
-          });
-        } else if (res.status === 'pattern_skipped') {
-          patternSkippedCount++;
-        } else if (res.status === 'quality_skipped') {
-          qualitySkippedCount++;
-        }
+    for (const uniqueUrl of allFoundUrls) {
+      if (filterPattern && filterPattern.trim() !== '' && !uniqueUrl.includes(filterPattern)) {
+        patternSkippedCount++;
+        continue;
       }
+      newUrlsToStore.push({
+        url: uniqueUrl,
+        sourceDomain: websiteDomain,
+        copied: false,
+        qualityStatus: 'unchecked' // Default state
+      });
     }
 
     let newUrlsStoredCount = 0;
@@ -242,11 +173,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
       message: `Processed. Found ${allFoundUrls.size}. Stored ${newUrlsStoredCount}.`,
       newUrlsStored: newUrlsStoredCount,
       totalUrlsFound: allFoundUrls.size,
-      skipped: patternSkippedCount + qualitySkippedCount,
-      details: {
-        patternSkipped: patternSkippedCount,
-        qualitySkipped: qualitySkippedCount
-      },
+      skipped: patternSkippedCount,
       domain: websiteDomain
     });
 
@@ -256,36 +183,103 @@ app.post('/api/extract-sitemap', async (req, res) => {
   }
 });
 
-// 2. Get URLs (Paginated & Filtered)
+// 2. Scan Batch for Quality
+app.post('/api/scan-quality-batch', async (req, res) => {
+  const { limit = 10 } = req.body;
+  
+  try {
+    // Find unchecked URLs
+    const urlsToScan = await SitemapUrl.find({ qualityStatus: 'unchecked' }).limit(limit);
+    
+    if (urlsToScan.length === 0) {
+      return res.json({ processed: 0, remaining: 0 });
+    }
+
+    let approved = 0;
+    let rejected = 0;
+
+    const results = await Promise.all(urlsToScan.map(async (doc) => {
+      const { valid, rating, reviews } = await checkUrlQuality(doc.url);
+      return {
+        id: doc._id,
+        status: valid ? 'approved' : 'rejected',
+        rating,
+        reviews
+      };
+    }));
+
+    // Bulk update results
+    const operations = results.map(r => ({
+      updateOne: {
+        filter: { _id: r.id },
+        update: { 
+          $set: { 
+            qualityStatus: r.status,
+            rating: r.rating,
+            reviews: r.reviews
+          } 
+        }
+      }
+    }));
+
+    await SitemapUrl.bulkWrite(operations);
+
+    approved = results.filter(r => r.status === 'approved').length;
+    rejected = results.filter(r => r.status === 'rejected').length;
+
+    const remaining = await SitemapUrl.countDocuments({ qualityStatus: 'unchecked' });
+
+    res.json({
+      processed: urlsToScan.length,
+      approved,
+      rejected,
+      remaining
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Scan failed' });
+  }
+});
+
+// 3. Get URLs
 app.get('/api/urls', async (req, res) => {
   const { domain, page = 1, limit = 50, status, search } = req.query;
   
   const query = {};
-  if (domain) {
-    query.sourceDomain = domain;
-  }
+  if (domain) query.sourceDomain = domain;
 
-  // Status Filter
-  if (status === 'pending') {
+  // VIEW FILTERS
+  if (status === 'unchecked') {
+    query.qualityStatus = 'unchecked';
+  } else if (status === 'pending') {
+    // Pending means: Approved Quality AND Not Copied
+    query.qualityStatus = 'approved';
     query.copied = false;
+  } else if (status === 'rejected') {
+    query.qualityStatus = 'rejected';
   } else if (status === 'copied') {
     query.copied = true;
+  } else {
+    // 'all' view: Show everything except rejected usually, but let's just show valid stuff
+    // Or simpler: Show everything
   }
 
-  // Search Filter (Regex)
-  if (search) {
-    query.url = { $regex: search, $options: 'i' };
-  }
+  if (search) query.url = { $regex: search, $options: 'i' };
 
   const pageNum = parseInt(page);
   const limitNum = parseInt(limit);
 
   try {
     const total = await SitemapUrl.countDocuments(query);
-    // Get total stats for the whole DB regardless of filter, so the boxes remain accurate
-    const totalDb = await SitemapUrl.countDocuments({});
-    const pendingDb = await SitemapUrl.countDocuments({ copied: false });
     
+    // Global Stats
+    const totalDb = await SitemapUrl.countDocuments({});
+    const uncheckedDb = await SitemapUrl.countDocuments({ qualityStatus: 'unchecked' });
+    const approvedPendingDb = await SitemapUrl.countDocuments({ qualityStatus: 'approved', copied: false });
+    const rejectedDb = await SitemapUrl.countDocuments({ qualityStatus: 'rejected' });
+    const copiedDb = await SitemapUrl.countDocuments({ copied: true });
+
     const urls = await SitemapUrl.find(query)
       .sort({ url: 1 }) 
       .skip((pageNum - 1) * limitNum)
@@ -293,16 +287,13 @@ app.get('/api/urls', async (req, res) => {
 
     res.json({
       data: urls,
-      pagination: {
-        total,
-        page: pageNum,
-        limit: limitNum,
-        pages: Math.ceil(total / limitNum)
-      },
+      pagination: { total, page: pageNum, limit: limitNum, pages: Math.ceil(total / limitNum) },
       stats: {
         totalUrls: totalDb,
-        pending: pendingDb,
-        copied: totalDb - pendingDb
+        unchecked: uncheckedDb,
+        pending: approvedPendingDb, // "Pending" for user actions
+        rejected: rejectedDb,
+        copied: copiedDb
       }
     });
   } catch (error) {
@@ -311,29 +302,23 @@ app.get('/api/urls', async (req, res) => {
   }
 });
 
-// 2.5 Get Pending URLs as Text (Supports limit & search)
+// 4. Get Pending (Approved & Uncopied) URLs as Text
 app.get('/api/urls/pending', async (req, res) => {
   const { domain, limit, search } = req.query;
-  const query = { copied: false };
   
-  if (domain) {
-    query.sourceDomain = domain;
-  }
-
-  if (search) {
-    query.url = { $regex: search, $options: 'i' };
-  }
+  // Pending for Copying = Approved + Not Copied
+  // (We assume user doesn't want to copy Unchecked ones unless they check them first)
+  const query = { copied: false, qualityStatus: 'approved' };
+  
+  if (domain) query.sourceDomain = domain;
+  if (search) query.url = { $regex: search, $options: 'i' };
 
   try {
     let queryBuilder = SitemapUrl.find(query).select('url').sort({ url: 1 });
-    
     if (limit) {
       const limitNum = parseInt(limit);
-      if (!isNaN(limitNum) && limitNum > 0) {
-        queryBuilder = queryBuilder.limit(limitNum);
-      }
+      if (!isNaN(limitNum) && limitNum > 0) queryBuilder = queryBuilder.limit(limitNum);
     }
-
     const urls = await queryBuilder;
     const text = urls.map(u => u.url).join('\n');
     res.json({ text, count: urls.length, urls: urls.map(u => u.url) });
@@ -342,20 +327,17 @@ app.get('/api/urls/pending', async (req, res) => {
   }
 });
 
-// 3. Mark URLs as copied
+// 5. Mark Copied
 app.post('/api/mark-copied', async (req, res) => {
   const { urls, allPending, domain, search } = req.body; 
 
   try {
     if (allPending) {
-       // Mark ALL pending matching the query (including search if provided)
-       const query = { copied: false };
+       const query = { copied: false, qualityStatus: 'approved' };
        if (domain) query.sourceDomain = domain;
        if (search) query.url = { $regex: search, $options: 'i' };
-       
        await SitemapUrl.updateMany(query, { $set: { copied: true } });
     } else if (urls && Array.isArray(urls)) {
-       // Mark specific list
        await SitemapUrl.updateMany(
         { url: { $in: urls } },
         { $set: { copied: true } }
@@ -369,29 +351,12 @@ app.post('/api/mark-copied', async (req, res) => {
   }
 });
 
-// 4. Clear Database
 app.post('/api/clear-database', async (req, res) => {
   try {
     await SitemapUrl.deleteMany({});
     res.json({ success: true, message: 'Database cleared successfully' });
   } catch (error) {
-    console.error('Clear database error:', error);
     res.status(500).json({ error: 'Failed to clear database' });
-  }
-});
-
-// 5. Get Last Active Domain
-app.get('/api/last-active-domain', async (req, res) => {
-  try {
-    const lastEntry = await SitemapUrl.findOne().sort({ extractedAt: -1 });
-    if (lastEntry) {
-      res.json({ domain: lastEntry.sourceDomain });
-    } else {
-      res.json({ domain: null });
-    }
-  } catch (error) {
-    console.error('Error fetching last domain:', error);
-    res.status(500).json({ error: 'Failed to fetch last domain' });
   }
 });
 

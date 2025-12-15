@@ -1,11 +1,12 @@
 import React from 'react';
-import { Copy, ClipboardList, Trash2, FileText } from 'lucide-react';
+import { Copy, ClipboardList, Trash2, FileText, ScanSearch } from 'lucide-react';
 import { Card } from './Card';
 import { Button } from './Button';
 
 interface ActionPanelProps {
   loading: boolean;
-  stats: { totalUrls: number; pending: number; copied: number };
+  scanLoading: boolean;
+  stats: { totalUrls: number; unchecked: number; pending: number; copied: number };
   filterStatus: string;
   searchTerm: string;
   onCopyNextBatch: (amount: number) => void;
@@ -13,11 +14,13 @@ interface ActionPanelProps {
   onCopyPagePending: () => void;
   onShowRaw: () => void;
   onClearDatabase: () => void;
+  onRunScan: () => void;
   pageHasPending: boolean;
 }
 
 export const ActionPanel = ({
   loading,
+  scanLoading,
   stats,
   filterStatus,
   searchTerm,
@@ -26,36 +29,55 @@ export const ActionPanel = ({
   onCopyPagePending,
   onShowRaw,
   onClearDatabase,
+  onRunScan,
   pageHasPending
 }: ActionPanelProps) => {
   const progressPercent = stats.totalUrls > 0 ? Math.round((stats.copied / stats.totalUrls) * 100) : 0;
 
   return (
     <>
-      <Card title="Quick Actions" icon={Copy}>
-        <div className="flex flex-col gap-3">
+      {stats.unchecked > 0 && (
+        <Card title="2. Quality Check" icon={ScanSearch} className="border-indigo-100 bg-indigo-50/50">
+          <p className="text-xs text-indigo-700 mb-3">
+            {stats.unchecked} URLs are waiting to be scanned for content quality (Rating &ge; 4.0, Reviews &ge; 50).
+          </p>
           <Button 
             variant="primary" 
+            onClick={onRunScan} 
+            disabled={scanLoading} 
+            fullWidth 
+            icon={ScanSearch}
+            className="!bg-indigo-600 hover:!bg-indigo-700"
+          >
+            {scanLoading ? 'Scanning (Please wait)...' : 'Scan Unchecked URLs'}
+          </Button>
+        </Card>
+      )}
+
+      <Card title="3. Actions" icon={Copy}>
+        <div className="flex flex-col gap-3">
+          <Button 
+            variant="secondary" 
             onClick={() => onCopyNextBatch(10)} 
-            disabled={loading || (filterStatus === 'copied')} 
+            disabled={loading || filterStatus === 'copied' || filterStatus === 'rejected'} 
             fullWidth 
             icon={ClipboardList}
           >
-            Copy Next 10 Pending {searchTerm ? '(Filtered)' : ''}
+            Copy Next 10 Pending
           </Button>
 
           <Button 
             variant="success" 
             onClick={onCopyAllPending} 
-            disabled={loading || (filterStatus === 'copied')} 
+            disabled={loading || filterStatus === 'copied' || filterStatus === 'rejected'} 
             fullWidth 
             icon={Copy}
           >
-            {loading ? 'Processing...' : `Copy All Pending ${searchTerm ? '(Filtered)' : ''}`}
+            Copy All Pending
           </Button>
           
           <Button 
-            variant="secondary" 
+            variant="outline" 
             onClick={onCopyPagePending} 
             disabled={!pageHasPending} 
             fullWidth 
@@ -65,7 +87,7 @@ export const ActionPanel = ({
           </Button>
 
           <Button 
-            variant="outline" 
+            variant="ghost" 
             onClick={onShowRaw} 
             fullWidth 
             icon={FileText}
@@ -75,7 +97,7 @@ export const ActionPanel = ({
 
           <div className="mt-2">
             <div className="flex justify-between text-xs text-gray-500 mb-1.5 font-medium">
-              <span>Progress (Total DB)</span>
+              <span>Overall Completion</span>
               <span>{progressPercent}%</span>
             </div>
             <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
