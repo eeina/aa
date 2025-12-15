@@ -218,27 +218,18 @@ app.get('/api/urls', async (req, res) => {
   }
 });
 
-// 2.5 Get Pending URLs as Text (Supports limit)
+// 2.5 Get ALL Pending URLs as Text (For "Copy All" button)
 app.get('/api/urls/pending', async (req, res) => {
-  const { domain, limit } = req.query;
+  const { domain } = req.query;
   const query = { copied: false };
   if (domain) {
     query.sourceDomain = domain;
   }
 
   try {
-    let queryBuilder = SitemapUrl.find(query).select('url').sort({ url: 1 });
-    
-    if (limit) {
-      const limitNum = parseInt(limit);
-      if (!isNaN(limitNum) && limitNum > 0) {
-        queryBuilder = queryBuilder.limit(limitNum);
-      }
-    }
-
-    const urls = await queryBuilder;
+    const urls = await SitemapUrl.find(query).select('url').sort({ url: 1 });
     const text = urls.map(u => u.url).join('\n');
-    res.json({ text, count: urls.length, urls: urls.map(u => u.url) });
+    res.json({ text, count: urls.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch pending URLs' });
   }
