@@ -14,7 +14,8 @@ import {
   ChevronsRight,
   Trash2,
   FileText,
-  X
+  X,
+  ClipboardList
 } from 'lucide-react';
 
 import { SitemapUrlItem } from './types';
@@ -112,6 +113,44 @@ export default function App() {
        showToast('Failed to update status on server', 'error');
     }
   }
+
+  // Copy specific next N pending URLs
+  const copyNextBatch = async (amount: number) => {
+    if (stats.pending === 0) return showToast('No pending URLs.', 'error');
+
+    setLoading(true);
+    try {
+      const res = await fetch(`http://localhost:5000/api/urls/pending?limit=${amount}`);
+      const data = await res.json();
+      
+      if (data.urls && data.urls.length > 0) {
+        const success = await copyBatchText(data.text);
+        if (success) {
+           await fetch('http://localhost:5000/api/mark-copied', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: data.urls }),
+          });
+          
+          // Optimistic Update for UI responsiveness
+          setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
+          setStats(prev => ({
+             ...prev,
+             copied: prev.copied + data.count,
+             pending: prev.pending - data.count
+          }));
+          
+          showToast(`Copied next ${data.count} URLs!`);
+        }
+      } else {
+        showToast('No uncopied URLs available.', 'error');
+      }
+    } catch (e) {
+      showToast('Failed to fetch batch', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Copy ALL pending in the entire database
   const copyAllPending = async () => {
@@ -253,6 +292,16 @@ export default function App() {
           {stats.totalUrls > 0 && (
             <Card title="Quick Actions" icon={Copy}>
               <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
+                <Button 
+                  variant="primary" 
+                  onClick={() => copyNextBatch(10)} 
+                  disabled={loading || stats.pending === 0} 
+                  fullWidth 
+                  icon={ClipboardList}
+                >
+                  Copy Next 10 Pending
+                </Button>
+
                 <Button 
                   variant="success" 
                   onClick={copyAllPending} 
