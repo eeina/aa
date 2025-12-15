@@ -24,7 +24,9 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('Could not connect to MongoDB:', err));
 
-// --- Mongoose Schema and Model ---
+// --- Mongoose Schemas and Models ---
+
+// 1. Content URLs (Pages)
 const sitemapUrlSchema = new mongoose.Schema({
   url: { type: String, required: true, unique: true },
   sourceDomain: { type: String, required: true },
@@ -33,6 +35,16 @@ const sitemapUrlSchema = new mongoose.Schema({
 });
 
 const SitemapUrl = mongoose.model('SitemapUrl', sitemapUrlSchema);
+
+// 2. Sitemap XMLs (The sitemap files themselves)
+const sitemapFileSchema = new mongoose.Schema({
+  url: { type: String, required: true, unique: true },
+  sourceDomain: { type: String, required: true },
+  foundAt: { type: Date, default: Date.now },
+  type: { type: String, default: 'xml' } // Just to be explicit
+});
+
+const SitemapFile = mongoose.model('SitemapFile', sitemapFileSchema);
 
 // --- Helper Functions for Sitemap Processing ---
 
@@ -107,40 +119,40 @@ async function checkUrlQuality(url) {
 }
 
 /**
- * Recursively extracts all URLs from a sitemap (or sitemap index).
+ * Recursively extracts content URLs AND sitemap URLs.
  * @param {string} sitemapUrl
- * @param {Set<string>} extractedUrlsSet - A set to keep track of already extracted URLs to avoid duplicates.
- * @returns {Promise<string[]>}
+ * @param {Set<string>} extractedUrlsSet - Content URLs
+ * @param {Set<string>} extractedSitemapsSet - Sitemap XML URLs
+ * @returns {Promise<void>}
  */
-async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
+async function extractUrlsAndSitemaps(sitemapUrl, extractedUrlsSet, extractedSitemapsSet) {
   try {
     const xmlContent = await fetchContent(sitemapUrl);
     const result = await parseStringPromise(xmlContent);
-
-    const urls = [];
 
     // Check if it's a sitemap index file
     if (result.sitemapindex && result.sitemapindex.sitemap) {
       for (const sitemapEntry of result.sitemapindex.sitemap) {
         const nestedSitemapUrl = sitemapEntry.loc?.[0];
         if (nestedSitemapUrl) {
-          const nestedUrls = await extractUrlsFromSitemap(nestedSitemapUrl, extractedUrlsSet);
-          urls.push(...nestedUrls);
+          // It's a sitemap, add to set
+          if (!extractedSitemapsSet.has(nestedSitemapUrl)) {
+             extractedSitemapsSet.add(nestedSitemapUrl);
+             // Recurse
+             await extractUrlsAndSitemaps(nestedSitemapUrl, extractedUrlsSet, extractedSitemapsSet);
+          }
         }
       }
     } else if (result.urlset && result.urlset.url) { // Otherwise, it's a regular sitemap
       for (const urlEntry of result.urlset.url) {
         const loc = urlEntry.loc?.[0];
         if (loc && !extractedUrlsSet.has(loc)) {
-          urls.push(loc);
           extractedUrlsSet.add(loc);
         }
       }
     }
-    return urls;
   } catch (error) {
     console.error(`Error processing sitemap ${sitemapUrl}:`, error.message);
-    return []; // Return empty array on error for this sitemap
   }
 }
 
@@ -161,26 +173,26 @@ app.post('/api/extract-sitemap', async (req, res) => {
     return res.status(400).json({ error: 'Invalid URL provided' });
   }
 
-  const allFoundUrls = new Set();
+  const allFoundUrls = new Set(); // Content pages
+  const allFoundSitemaps = new Set(); // XML files
+  
+  // Add the root sitemap itself
+  allFoundSitemaps.add(sitemapUrl);
 
   try {
-    // 1. Extract all URLs from sitemap structure first
-    await extractUrlsFromSitemap(sitemapUrl, allFoundUrls);
+    // 1. Extract all URLs and Sitemaps recursively
+    await extractUrlsAndSitemaps(sitemapUrl, allFoundUrls, allFoundSitemaps);
 
-    if (allFoundUrls.size === 0) {
-      return res.status(404).json({ error: 'No URLs found in the provided sitemap.' });
+    if (allFoundUrls.size === 0 && allFoundSitemaps.size === 0) {
+      return res.status(404).json({ error: 'No content found in the provided sitemap.' });
     }
 
-    // 2. Filter Process
+    // 2. Process Content URLs (Filter & Store)
     const newUrlsToStore = [];
     let patternSkippedCount = 0;
     let qualitySkippedCount = 0;
 
-    // Convert Set to Array for processing
     const candidates = Array.from(allFoundUrls);
-
-    // We process sequentially or in small batches to check quality if enabled
-    // because checking 1000 URLs at once will crash/timeout.
     
     // Batch size for quality check
     const BATCH_SIZE = 10; 
@@ -223,6 +235,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
       }
     }
 
+    // 3. Store Content URLs
     let newUrlsStoredCount = 0;
     if (newUrlsToStore.length > 0) {
       try {
@@ -231,16 +244,34 @@ app.post('/api/extract-sitemap', async (req, res) => {
       } catch (bulkError) {
         if (bulkError.code === 11000) {
           newUrlsStoredCount = bulkError.result.nInserted;
-          console.warn(`Encountered duplicate URLs, inserted ${newUrlsStoredCount} new ones.`);
         } else {
           throw bulkError;
         }
       }
     }
 
+    // 4. Store Sitemap XMLs
+    const newSitemapsToStore = Array.from(allFoundSitemaps).map(url => ({
+      url,
+      sourceDomain: websiteDomain
+    }));
+
+    let newSitemapsStoredCount = 0;
+    if (newSitemapsToStore.length > 0) {
+      try {
+        const insertResult = await SitemapFile.insertMany(newSitemapsToStore, { ordered: false });
+        newSitemapsStoredCount = insertResult.length;
+      } catch (bulkError) {
+        if (bulkError.code === 11000) {
+          newSitemapsStoredCount = bulkError.result.nInserted;
+        } 
+      }
+    }
+
     res.status(200).json({
-      message: `Processed. Found ${allFoundUrls.size}. Stored ${newUrlsStoredCount}.`,
+      message: `Processed. Found ${allFoundUrls.size} URLs, ${allFoundSitemaps.size} Sitemaps. Stored ${newUrlsStoredCount} URLs.`,
       newUrlsStored: newUrlsStoredCount,
+      newSitemapsStored: newSitemapsStoredCount,
       totalUrlsFound: allFoundUrls.size,
       skipped: patternSkippedCount + qualitySkippedCount,
       details: {
@@ -385,6 +416,7 @@ app.delete('/api/urls/:id', async (req, res) => {
 app.post('/api/clear-database', async (req, res) => {
   try {
     await SitemapUrl.deleteMany({});
+    await SitemapFile.deleteMany({});
     res.json({ success: true, message: 'Database cleared successfully' });
   } catch (error) {
     console.error('Clear database error:', error);
@@ -404,6 +436,30 @@ app.get('/api/last-active-domain', async (req, res) => {
   } catch (error) {
     console.error('Error fetching last domain:', error);
     res.status(500).json({ error: 'Failed to fetch last domain' });
+  }
+});
+
+// --- SITEMAP MANAGEMENT ENDPOINTS ---
+
+// 7. Get Sitemaps (XML Files)
+app.get('/api/sitemaps', async (req, res) => {
+  try {
+    const sitemaps = await SitemapFile.find().sort({ foundAt: -1 });
+    res.json({ data: sitemaps });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch sitemaps' });
+  }
+});
+
+// 8. Delete Sitemap
+app.delete('/api/sitemaps/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await SitemapFile.findByIdAndDelete(id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete sitemap' });
   }
 });
 

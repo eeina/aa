@@ -4,3 +4,10 @@ export interface SitemapUrlItem {
   copied: boolean;
   sourceDomain: string;
 }
+
+export interface SitemapFileItem {
+  _id: string;
+  url: string;
+  sourceDomain: string;
+  foundAt: string;
+}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { SitemapUrlItem } from './types';
+import { SitemapUrlItem, SitemapFileItem } from './types';
 
 // Components
 import { Header } from './components/Header';
@@ -7,6 +7,7 @@ import { SitemapInput } from './components/SitemapInput';
 import { StatsOverview } from './components/StatsOverview';
 import { ActionPanel } from './components/ActionPanel';
 import { UrlListView } from './components/UrlListView';
+import { SitemapListView } from './components/SitemapListView';
 import { RawModal } from './components/RawModal';
 import { Notification } from './components/Notification';
 
@@ -15,9 +16,16 @@ export default function App() {
   const [extractionFilter, setExtractionFilter] = useState(''); // Import Pattern Filter
   const [enableQualityFilter, setEnableQualityFilter] = useState(false); // Quality Content Filter
   const [loading, setLoading] = useState(false);
+  
+  // Data State
   const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
+  const [sitemaps, setSitemaps] = useState<SitemapFileItem[]>([]);
+  
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [showRawModal, setShowRawModal] = useState(false);
+  
+  // UI State
+  const [activeTab, setActiveTab] = useState<'urls' | 'sitemaps'>('urls');
   
   // View Filters
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'copied'>('all');
@@ -54,10 +62,23 @@ export default function App() {
     }
   }, [filterStatus, searchTerm]);
 
+  const fetchSitemaps = useCallback(async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/sitemaps');
+      if (res.ok) {
+        const result = await res.json();
+        setSitemaps(result.data);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   // Initial load
   useEffect(() => {
     fetchUrls(1);
-  }, [fetchUrls]);
+    fetchSitemaps();
+  }, [fetchUrls, fetchSitemaps]);
 
   const handleExtract = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,7 +100,10 @@ export default function App() {
       const data = await res.json();
       
       if (res.ok) {
-        let msg = `Done! Found ${data.totalUrlsFound}. Stored ${data.newUrlsStored}.`;
+        let msg = `Done! Found ${data.totalUrlsFound} URLs.`;
+        if (data.newSitemapsStored > 0) {
+           msg += ` Added ${data.newSitemapsStored} new Sitemaps.`;
+        }
         if (data.skipped > 0) {
           msg += ` Skipped ${data.skipped} (Pattern: ${data.details.patternSkipped}, Low Quality: ${data.details.qualitySkipped})`;
         }
@@ -88,6 +112,7 @@ export default function App() {
         setExtractionFilter('');
         setEnableQualityFilter(false);
         await fetchUrls(1);
+        await fetchSitemaps();
       } else {
         showToast(data.error || 'Extraction failed', 'error');
       }
@@ -101,6 +126,7 @@ export default function App() {
   const copyBatchText = async (text: string) => {
      try {
       await navigator.clipboard.writeText(text);
+      showToast('Copied to clipboard!');
       return true;
     } catch (err) {
       showToast('Clipboard access denied.', 'error');
@@ -140,8 +166,9 @@ export default function App() {
       const data = await res.json();
       
       if (data.urls && data.urls.length > 0) {
-        const success = await copyBatchText(data.text);
-        if (success) {
+        try {
+          await navigator.clipboard.writeText(data.text);
+          
            await fetch('http://localhost:5000/api/mark-copied', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -151,6 +178,8 @@ export default function App() {
           setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
           fetchUrls(pagination.page);
           showToast(`Copied next ${data.count} URLs!`);
+        } catch(e) {
+          showToast('Clipboard denied', 'error');
         }
       } else {
         showToast('No uncopied URLs matching your filter.', 'error');
@@ -174,10 +203,12 @@ export default function App() {
       const data = await res.json();
       
       if (data.text) {
-        const success = await copyBatchText(data.text);
-        if (success) {
+        try {
+          await navigator.clipboard.writeText(data.text);
           await markAllPendingAsCopied();
           showToast(`Copied ${data.count} URLs!`);
+        } catch(e) {
+          showToast('Clipboard denied', 'error');
         }
       } else {
         showToast('No URLs to copy', 'error');
@@ -194,38 +225,34 @@ export default function App() {
     if (pagePending.length === 0) return showToast('No pending URLs on this page.', 'error');
 
     const text = pagePending.map(u => u.url).join('\n');
-    const success = await copyBatchText(text);
-    if (success) {
-      try {
-        await fetch('http://localhost:5000/api/mark-copied', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: pagePending.map(u => u.url) }),
-        });
-        
-        setUrls(prev => prev.map(u => ({ ...u, copied: true })));
-        fetchUrls(pagination.page);
-        showToast(`Copied ${pagePending.length} URLs from this page!`);
-      } catch (e) {
-         showToast('Failed to update status', 'error');
-      }
+    try {
+      await navigator.clipboard.writeText(text);
+      await fetch('http://localhost:5000/api/mark-copied', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: pagePending.map(u => u.url) }),
+      });
+      
+      setUrls(prev => prev.map(u => ({ ...u, copied: true })));
+      fetchUrls(pagination.page);
+      showToast(`Copied ${pagePending.length} URLs from this page!`);
+    } catch (e) {
+       showToast('Failed to copy or update', 'error');
     }
   };
 
   const copySingle = async (item: SitemapUrlItem) => {
-    const success = await copyBatchText(item.url);
-    if (success) {
-       try {
-        await fetch('http://localhost:5000/api/mark-copied', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: [item.url] }),
-        });
-        setUrls(prev => prev.map(u => u._id === item._id ? { ...u, copied: true } : u));
-        showToast('URL copied!');
-      } catch (err) {
-        showToast('Failed to update status', 'error');
-      }
+    try {
+      await navigator.clipboard.writeText(item.url);
+       await fetch('http://localhost:5000/api/mark-copied', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: [item.url] }),
+      });
+      setUrls(prev => prev.map(u => u._id === item._id ? { ...u, copied: true } : u));
+      showToast('URL copied!');
+    } catch (err) {
+      showToast('Failed to copy', 'error');
     }
   };
 
@@ -234,8 +261,6 @@ export default function App() {
     try {
       const res = await fetch(`http://localhost:5000/api/urls/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        // Optimistic UI update or Refetch
-        // We'll refetch to keep pagination accurate
         await fetchUrls(pagination.page);
         showToast('URL deleted');
       } else {
@@ -246,13 +271,29 @@ export default function App() {
     }
   };
 
+  const deleteSitemap = async (id: string) => {
+    if (!window.confirm("Delete this Sitemap entry? (Extracted URLs will remain)")) return;
+    try {
+      const res = await fetch(`http://localhost:5000/api/sitemaps/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        await fetchSitemaps();
+        showToast('Sitemap entry deleted');
+      } else {
+        showToast('Failed to delete', 'error');
+      }
+    } catch (e) {
+      showToast('Error connecting to server', 'error');
+    }
+  };
+
   const handleClearDatabase = async () => {
-    if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) return;
+    if (!window.confirm("Are you sure you want to delete ALL data (URLs and Sitemaps)? This cannot be undone.")) return;
 
     try {
       const res = await fetch('http://localhost:5000/api/clear-database', { method: 'POST' });
       if (res.ok) {
         setUrls([]);
+        setSitemaps([]);
         setStats({ totalUrls: 0, pending: 0, copied: 0 });
         setPagination({ page: 1, limit: 50, total: 0, pages: 1 });
         showToast('Database cleared successfully.');
@@ -312,18 +353,45 @@ export default function App() {
         <div className="flex flex-col gap-4 min-w-0">
           <Notification message={toast.msg} type={toast.type} />
           
-          <UrlListView 
-            urls={urls}
-            pagination={pagination}
-            statsTotal={stats.totalUrls}
-            filterStatus={filterStatus}
-            setFilterStatus={setFilterStatus}
-            searchTerm={searchTerm}
-            setSearchTerm={setSearchTerm}
-            onCopySingle={copySingle}
-            onDeleteSingle={deleteUrl}
-            onPageChange={handlePageChange}
-          />
+          {/* Tab Switcher */}
+          <div className="flex gap-4 border-b border-gray-200">
+             <button 
+               className={`pb-2 px-4 font-medium text-sm transition-colors relative ${activeTab === 'urls' ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+               onClick={() => setActiveTab('urls')}
+             >
+               Content URLs
+               {activeTab === 'urls' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full"></div>}
+             </button>
+             <button 
+               className={`pb-2 px-4 font-medium text-sm transition-colors relative ${activeTab === 'sitemaps' ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+               onClick={() => setActiveTab('sitemaps')}
+             >
+               Managed Sitemaps
+               <span className="ml-2 bg-gray-200 text-gray-600 text-[10px] px-1.5 py-0.5 rounded-full">{sitemaps.length}</span>
+               {activeTab === 'sitemaps' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-600 rounded-t-full"></div>}
+             </button>
+          </div>
+
+          {activeTab === 'urls' ? (
+            <UrlListView 
+              urls={urls}
+              pagination={pagination}
+              statsTotal={stats.totalUrls}
+              filterStatus={filterStatus}
+              setFilterStatus={setFilterStatus}
+              searchTerm={searchTerm}
+              setSearchTerm={setSearchTerm}
+              onCopySingle={copySingle}
+              onDeleteSingle={deleteUrl}
+              onPageChange={handlePageChange}
+            />
+          ) : (
+            <SitemapListView 
+              sitemaps={sitemaps}
+              onCopy={copyBatchText}
+              onDelete={deleteSitemap}
+            />
+          )}
         </div>
 
       </main>
@@ -333,8 +401,7 @@ export default function App() {
         onClose={() => setShowRawModal(false)} 
         urls={urls}
         onCopy={async (text) => {
-          const success = await copyBatchText(text);
-          if(success) showToast('Page copied!');
+          await copyBatchText(text);
         }}
       />
     </div>
