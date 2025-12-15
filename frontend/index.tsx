@@ -26,7 +26,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('/api/extract-sitemap', {
+      const response = await fetch('http://localhost:3000/api/extract-sitemap', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

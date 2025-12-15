@@ -16,7 +16,9 @@
     "zlib": "^1.0.5",
     "mongoose": "^9.0.1",
     "cheerio": "^1.1.2",
-    "xml2js": "^0.6.2"
+    "xml2js": "^0.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

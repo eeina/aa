@@ -1,17 +1,24 @@
+import 'dotenv/config'; // Load environment variables from .env file
 import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
 import cheerio from 'cheerio';
 import zlib from 'zlib';
+import cors from 'cors';
 
 const app = express();
 const port = 3000;
 
+app.use(cors()); // Enable CORS for all routes
 app.use(express.json()); // For parsing application/json requests
 
 // --- MongoDB Connection ---
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sitemap_db';
+
+// Log the connection attempt (masking password for security)
+const maskedUri = MONGODB_URI.replace(/:([^:@]+)@/, ':****@');
+console.log(`Attempting to connect to MongoDB at: ${maskedUri}`);
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
@@ -29,13 +36,19 @@ const SitemapUrl = mongoose.model('SitemapUrl', sitemapUrlSchema);
 // --- Helper Functions for Sitemap Processing ---
 
 /**
- * Fetches content from a URL, handling gzipped responses.
+ * Fetches content from a URL, handling gzipped responses and setting User-Agent.
  * @param {string} url
  * @returns {Promise<string>}
  */
 async function fetchContent(url) {
   try {
-    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'SitemapExtractorBot/1.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
     const contentType = response.headers['content-type'];
     const contentEncoding = response.headers['content-encoding'];
 
@@ -65,8 +78,9 @@ function getSitemapUrlsFromRobotsTxt(robotsTxtContent) {
   const sitemapUrls = [];
   const lines = robotsTxtContent.split('\n');
   for (const line of lines) {
-    if (line.toLowerCase().startsWith('sitemap:')) {
-      const sitemapUrl = line.substring('sitemap:'.length).trim();
+    const trimmedLine = line.trim();
+    if (trimmedLine.toLowerCase().startsWith('sitemap:')) {
+      const sitemapUrl = trimmedLine.substring('sitemap:'.length).trim();
       if (sitemapUrl) {
         sitemapUrls.push(sitemapUrl);
       }
@@ -185,8 +199,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
       }
     }
     
-    // Add any URLs from sitemap index files that were processed recursively to allFoundUrls
-    extractedIndividualUrls.forEach(u => allFoundUrls.add(u));
+    // Note: allFoundUrls is populated by reference inside extractUrlsFromSitemap
 
     // 4. Store new URLs in MongoDB
     const newUrlsToStore = [];
