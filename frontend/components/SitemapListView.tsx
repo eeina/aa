@@ -4,7 +4,8 @@ import {
   ExternalLink, 
   Copy, 
   Trash2,
-  PieChart
+  PieChart,
+  ClipboardList
 } from 'lucide-react';
 import { Card } from './Card';
 import { Button } from './Button';
@@ -13,10 +14,11 @@ import { SitemapFileItem } from '../types';
 interface SitemapListViewProps {
   sitemaps: SitemapFileItem[];
   onCopy: (text: string) => void;
+  onCopyUrls: (id: string) => void;
   onDelete: (id: string) => void;
 }
 
-export const SitemapListView = ({ sitemaps, onCopy, onDelete }: SitemapListViewProps) => {
+export const SitemapListView = ({ sitemaps, onCopy, onCopyUrls, onDelete }: SitemapListViewProps) => {
   return (
     <Card title="Managed Sitemaps (XML)" icon={FileCode} className="h-full">
       <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 font-medium">
@@ -52,7 +54,11 @@ export const SitemapListView = ({ sitemaps, onCopy, onDelete }: SitemapListViewP
                 </div>
               </div>
               <div className="shrink-0 flex items-center gap-2">
-                <Button variant="ghost" onClick={() => onCopy(item.url)} className="!p-2 text-gray-400 hover:text-indigo-600" title="Copy URL">
+                 <Button variant="secondary" onClick={() => onCopyUrls(item._id)} className="!p-2 text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm" title="Copy all URLs in this XML">
+                  <ClipboardList size={16} />
+                </Button>
+                <div className="w-px h-6 bg-gray-200 mx-1"></div>
+                <Button variant="ghost" onClick={() => onCopy(item.url)} className="!p-2 text-gray-400 hover:text-indigo-600" title="Copy XML Link">
                   <Copy size={16} />
                 </Button>
                 <Button variant="ghost" onClick={() => onDelete(item._id)} className="!p-2 text-gray-400 hover:text-red-600" title="Delete Sitemap Entry">

@@ -30,6 +30,7 @@ mongoose.connect(MONGODB_URI)
 const sitemapUrlSchema = new mongoose.Schema({
   url: { type: String, required: true, unique: true },
   sourceDomain: { type: String, required: true },
+  parentSitemap: { type: String, default: null }, // The XML file this URL was found in
   extractedAt: { type: Date, default: Date.now },
   copied: { type: Boolean, default: false } // Track if the user has copied this URL
 });
@@ -120,12 +121,12 @@ async function checkUrlQuality(url) {
 
 /**
  * Recursively extracts content URLs AND sitemap URLs.
- * @param {string} sitemapUrl
- * @param {Set<string>} extractedUrlsSet - Content URLs
- * @param {Set<string>} extractedSitemapsSet - Sitemap XML URLs
+ * @param {string} sitemapUrl - The current XML file being processed
+ * @param {Map<string, string>} extractedUrlMap - Map<ContentURL, ParentSitemapURL>
+ * @param {Set<string>} extractedSitemapsSet - Set<SitemapURL>
  * @returns {Promise<void>}
  */
-async function extractUrlsAndSitemaps(sitemapUrl, extractedUrlsSet, extractedSitemapsSet) {
+async function extractUrlsAndSitemaps(sitemapUrl, extractedUrlMap, extractedSitemapsSet) {
   try {
     const xmlContent = await fetchContent(sitemapUrl);
     const result = await parseStringPromise(xmlContent);
@@ -139,15 +140,16 @@ async function extractUrlsAndSitemaps(sitemapUrl, extractedUrlsSet, extractedSit
           if (!extractedSitemapsSet.has(nestedSitemapUrl)) {
              extractedSitemapsSet.add(nestedSitemapUrl);
              // Recurse
-             await extractUrlsAndSitemaps(nestedSitemapUrl, extractedUrlsSet, extractedSitemapsSet);
+             await extractUrlsAndSitemaps(nestedSitemapUrl, extractedUrlMap, extractedSitemapsSet);
           }
         }
       }
     } else if (result.urlset && result.urlset.url) { // Otherwise, it's a regular sitemap
       for (const urlEntry of result.urlset.url) {
         const loc = urlEntry.loc?.[0];
-        if (loc && !extractedUrlsSet.has(loc)) {
-          extractedUrlsSet.add(loc);
+        if (loc && !extractedUrlMap.has(loc)) {
+          // Map the URL to the sitemap that contained it
+          extractedUrlMap.set(loc, sitemapUrl);
         }
       }
     }
@@ -173,7 +175,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
     return res.status(400).json({ error: 'Invalid URL provided' });
   }
 
-  const allFoundUrls = new Set(); // Content pages
+  const allFoundUrlMap = new Map(); // Key: URL, Value: ParentSitemap
   const allFoundSitemaps = new Set(); // XML files
   
   // Add the root sitemap itself
@@ -181,9 +183,9 @@ app.post('/api/extract-sitemap', async (req, res) => {
 
   try {
     // 1. Extract all URLs and Sitemaps recursively
-    await extractUrlsAndSitemaps(sitemapUrl, allFoundUrls, allFoundSitemaps);
+    await extractUrlsAndSitemaps(sitemapUrl, allFoundUrlMap, allFoundSitemaps);
 
-    if (allFoundUrls.size === 0 && allFoundSitemaps.size === 0) {
+    if (allFoundUrlMap.size === 0 && allFoundSitemaps.size === 0) {
       return res.status(404).json({ error: 'No content found in the provided sitemap.' });
     }
 
@@ -192,7 +194,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
     let patternSkippedCount = 0;
     let qualitySkippedCount = 0;
 
-    const candidates = Array.from(allFoundUrls);
+    const candidates = Array.from(allFoundUrlMap.keys());
     
     // Batch size for quality check
     const BATCH_SIZE = 10; 
@@ -225,6 +227,7 @@ app.post('/api/extract-sitemap', async (req, res) => {
           newUrlsToStore.push({
             url: res.url,
             sourceDomain: websiteDomain,
+            parentSitemap: allFoundUrlMap.get(res.url), // Add the parent sitemap association
             copied: false
           });
         } else if (res.status === 'pattern_skipped') {
@@ -269,10 +272,10 @@ app.post('/api/extract-sitemap', async (req, res) => {
     }
 
     res.status(200).json({
-      message: `Processed. Found ${allFoundUrls.size} URLs, ${allFoundSitemaps.size} Sitemaps. Stored ${newUrlsStoredCount} URLs.`,
+      message: `Processed. Found ${allFoundUrlMap.size} URLs, ${allFoundSitemaps.size} Sitemaps. Stored ${newUrlsStoredCount} URLs.`,
       newUrlsStored: newUrlsStoredCount,
       newSitemapsStored: newSitemapsStoredCount,
-      totalUrlsFound: allFoundUrls.size,
+      totalUrlsFound: allFoundUrlMap.size,
       skipped: patternSkippedCount + qualitySkippedCount,
       details: {
         patternSkipped: patternSkippedCount,
@@ -462,6 +465,34 @@ app.delete('/api/sitemaps/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to delete sitemap' });
   }
 });
+
+// 9. Get URLs belonging to a specific Sitemap
+app.get('/api/sitemaps/:id/urls', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Find the sitemap entry to get its URL string
+    const sitemap = await SitemapFile.findById(id);
+    
+    if (!sitemap) {
+      return res.status(404).json({ error: 'Sitemap not found' });
+    }
+
+    // Find all urls where parentSitemap equals the sitemap url
+    const urls = await SitemapUrl.find({ parentSitemap: sitemap.url });
+    const text = urls.map(u => u.url).join('\n');
+    
+    res.json({ 
+      text, 
+      count: urls.length, 
+      urls: urls.map(u => u.url),
+      sitemapUrl: sitemap.url
+    });
+  } catch (error) {
+    console.error('Error fetching sitemap urls:', error);
+    res.status(500).json({ error: 'Failed to fetch URLs' });
+  }
+});
+
 
 app.listen(port, () => {
   console.log(`Backend server listening at http://localhost:${port}`);

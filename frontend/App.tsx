@@ -286,6 +286,28 @@ export default function App() {
     }
   };
 
+  const copySitemapChildUrls = async (id: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`http://localhost:5000/api/sitemaps/${id}/urls`);
+      const data = await res.json();
+      if (res.ok) {
+        if (data.count === 0) {
+          showToast('No URLs associated with this sitemap.', 'error');
+        } else {
+          await navigator.clipboard.writeText(data.text);
+          showToast(`Copied ${data.count} URLs from sitemap!`);
+        }
+      } else {
+        showToast('Failed to fetch sitemap URLs', 'error');
+      }
+    } catch(e) {
+       showToast('Connection error', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleClearDatabase = async () => {
     if (!window.confirm("Are you sure you want to delete ALL data (URLs and Sitemaps)? This cannot be undone.")) return;
 
@@ -389,6 +411,7 @@ export default function App() {
             <SitemapListView 
               sitemaps={sitemaps}
               onCopy={copyBatchText}
+              onCopyUrls={copySitemapChildUrls}
               onDelete={deleteSitemap}
             />
           )}
