@@ -8,7 +8,11 @@ import {
   RefreshCw, 
   List, 
   ExternalLink,
-  PieChart
+  PieChart,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight
 } from 'lucide-react';
 
 // --- Types ---
@@ -20,10 +24,13 @@ interface SitemapUrlItem {
 }
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'success' | 'outline' | 'ghost';
+  variant?: 'primary' | 'success' | 'outline' | 'ghost' | 'secondary';
   icon?: React.ElementType;
   fullWidth?: boolean;
 }
+
+// --- Constants ---
+const ITEMS_PER_PAGE = 50;
 
 // --- Components ---
 
@@ -62,6 +69,11 @@ const Button: React.FC<ButtonProps> = ({
       backgroundColor: '#10b981',
       color: 'white',
       boxShadow: '0 4px 6px -1px rgba(16, 185, 129, 0.2)',
+    },
+    secondary: {
+      backgroundColor: '#8b5cf6',
+      color: 'white',
+      boxShadow: '0 4px 6px -1px rgba(139, 92, 246, 0.2)',
     },
     outline: {
       backgroundColor: 'transparent',
@@ -141,11 +153,20 @@ function App() {
   const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [currentDomain, setCurrentDomain] = useState('');
+  
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Stats
   const total = urls.length;
   const copied = urls.filter(u => u.copied).length;
   const pending = total - copied;
+
+  // Pagination Logic
+  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const displayedUrls = urls.slice(startIndex, endIndex);
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
@@ -160,6 +181,7 @@ function App() {
         const data = await res.json();
         setUrls(data);
         setCurrentDomain(domain);
+        setCurrentPage(1); // Reset to first page on new data
       }
     } catch (e) {
       console.error(e);
@@ -207,21 +229,31 @@ function App() {
       ));
     } catch (e) {
       console.error('Failed to sync copy status', e);
+      showToast('Failed to update status on server', 'error');
     }
   };
 
-  const copyBatch = async () => {
-    const batch = urls.filter(u => !u.copied).slice(0, 10);
+  const copyBatch = async (batch: SitemapUrlItem[], successMessage: string) => {
     if (batch.length === 0) return showToast('No pending URLs to copy.', 'error');
 
     const text = batch.map(u => u.url).join('\n');
     try {
       await navigator.clipboard.writeText(text);
       await markAsCopied(batch);
-      showToast(`Copied ${batch.length} URLs to clipboard!`);
+      showToast(successMessage);
     } catch (err) {
       showToast('Clipboard access denied.', 'error');
     }
+  };
+
+  const copyAllPending = () => {
+    const pendingUrls = urls.filter(u => !u.copied);
+    copyBatch(pendingUrls, `Copied all ${pendingUrls.length} pending URLs!`);
+  };
+
+  const copyPagePending = () => {
+    const pagePending = displayedUrls.filter(u => !u.copied);
+    copyBatch(pagePending, `Copied ${pagePending.length} URLs from this page!`);
   };
 
   const copySingle = async (item: SitemapUrlItem) => {
@@ -231,6 +263,15 @@ function App() {
       showToast('URL copied!');
     } catch (err) {
       showToast('Failed to copy', 'error');
+    }
+  };
+
+  const handlePageChange = (newPage: number) => {
+    if (newPage >= 1 && newPage <= totalPages) {
+      setCurrentPage(newPage);
+      // Optional: scroll to top of list
+      const listContainer = document.getElementById('url-list-container');
+      if (listContainer) listContainer.scrollTop = 0;
     }
   };
 
@@ -271,9 +312,26 @@ function App() {
           {urls.length > 0 && (
             <Card title="Quick Actions" icon={Copy}>
               <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
-                <Button variant="success" onClick={copyBatch} disabled={pending === 0} fullWidth icon={Copy}>
-                  Copy Next 10 Uncopied
+                <Button 
+                  variant="success" 
+                  onClick={copyAllPending} 
+                  disabled={pending === 0} 
+                  fullWidth 
+                  icon={Copy}
+                >
+                  Copy All Pending ({pending})
                 </Button>
+                
+                <Button 
+                  variant="secondary" 
+                  onClick={copyPagePending} 
+                  disabled={displayedUrls.filter(u => !u.copied).length === 0} 
+                  fullWidth 
+                  icon={Copy}
+                >
+                  Copy This Page
+                </Button>
+
                 <div style={styles.progressContainer}>
                   <div style={styles.progressLabel}>
                     <span>Progress</span>
@@ -303,7 +361,7 @@ function App() {
           
           <Card title="URL Database" icon={List} actions={
             <div style={{fontSize: '0.85rem', color: '#6b7280'}}>
-              Showing all {total} URLs
+              Page {currentPage} of {totalPages || 1} • Total {total}
             </div>
           }>
             {urls.length === 0 ? (
@@ -312,31 +370,72 @@ function App() {
                 <p>No URLs loaded yet. Enter a sitemap URL to get started.</p>
               </div>
             ) : (
-              <div style={styles.list}>
-                {urls.map((item, idx) => (
-                  <div key={item._id} style={{
-                    ...styles.listItem,
-                    opacity: item.copied ? 0.6 : 1,
-                    backgroundColor: item.copied ? '#f9fafb' : 'white',
-                  }}>
-                    <div style={styles.listIndex}>#{idx + 1}</div>
-                    <div style={styles.listContent}>
-                      <a href={item.url} target="_blank" rel="noreferrer" style={styles.link}>
-                        {item.url} <ExternalLink size={12} />
-                      </a>
+              <>
+                <div id="url-list-container" style={styles.list}>
+                  {displayedUrls.map((item, idx) => (
+                    <div key={item._id} style={{
+                      ...styles.listItem,
+                      opacity: item.copied ? 0.6 : 1,
+                      backgroundColor: item.copied ? '#f9fafb' : 'white',
+                    }}>
+                      <div style={styles.listIndex}>#{startIndex + idx + 1}</div>
+                      <div style={styles.listContent}>
+                        <a href={item.url} target="_blank" rel="noreferrer" style={styles.link}>
+                          {item.url} <ExternalLink size={12} />
+                        </a>
+                      </div>
+                      <div style={styles.listActions}>
+                        {item.copied ? (
+                          <span style={styles.badgeSuccess}>Copied</span>
+                        ) : (
+                          <Button variant="ghost" onClick={() => copySingle(item)}>
+                            <Copy size={16} />
+                          </Button>
+                        )}
+                      </div>
                     </div>
-                    <div style={styles.listActions}>
-                      {item.copied ? (
-                        <span style={styles.badgeSuccess}>Copied</span>
-                      ) : (
-                        <Button variant="ghost" onClick={() => copySingle(item)}>
-                          <Copy size={16} />
-                        </Button>
-                      )}
-                    </div>
+                  ))}
+                </div>
+                
+                {/* Pagination Controls */}
+                {totalPages > 1 && (
+                  <div style={styles.paginationContainer}>
+                    <button 
+                      style={styles.pageBtn} 
+                      disabled={currentPage === 1}
+                      onClick={() => handlePageChange(1)}
+                    >
+                      <ChevronsLeft size={18} />
+                    </button>
+                    <button 
+                      style={styles.pageBtn} 
+                      disabled={currentPage === 1}
+                      onClick={() => handlePageChange(currentPage - 1)}
+                    >
+                      <ChevronLeft size={18} />
+                    </button>
+                    
+                    <span style={styles.pageInfo}>
+                      Page <strong>{currentPage}</strong> of {totalPages}
+                    </span>
+
+                    <button 
+                      style={styles.pageBtn} 
+                      disabled={currentPage === totalPages}
+                      onClick={() => handlePageChange(currentPage + 1)}
+                    >
+                      <ChevronRight size={18} />
+                    </button>
+                    <button 
+                      style={styles.pageBtn} 
+                      disabled={currentPage === totalPages}
+                      onClick={() => handlePageChange(totalPages)}
+                    >
+                      <ChevronsRight size={18} />
+                    </button>
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </Card>
         </div>
@@ -457,7 +556,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.95rem',
     outline: 'none',
     transition: 'border-color 0.15s',
-  } as React.CSSProperties, // Cast to any or explicit style
+  } as React.CSSProperties,
   statsGrid: {
     display: 'grid',
     gridTemplateColumns: '1fr',
@@ -494,7 +593,8 @@ const styles: Record<string, React.CSSProperties> = {
   list: {
     display: 'flex',
     flexDirection: 'column',
-    maxHeight: '600px',
+    minHeight: '400px', // Ensure height stability
+    maxHeight: '600px', // Or auto if you want page scroll
     overflowY: 'auto',
   },
   listItem: {
@@ -508,7 +608,7 @@ const styles: Record<string, React.CSSProperties> = {
   listIndex: {
     fontSize: '0.85rem',
     color: '#9ca3af',
-    width: '30px',
+    width: '40px', // Slightly wider for 2000 items
   },
   listContent: {
     flex: 1,
@@ -581,6 +681,34 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#9ca3af',
     textAlign: 'center',
   },
+  paginationContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '16px',
+    borderTop: '1px solid #e5e7eb',
+    gap: '12px',
+    backgroundColor: '#f9fafb',
+  },
+  pageBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '36px',
+    height: '36px',
+    borderRadius: '8px',
+    border: '1px solid #d1d5db',
+    backgroundColor: 'white',
+    cursor: 'pointer',
+    color: '#374151',
+    transition: 'all 0.2s',
+  },
+  pageInfo: {
+    fontSize: '0.9rem',
+    color: '#374151',
+    minWidth: '100px',
+    textAlign: 'center' as 'center',
+  }
 };
 
 // Add global styles for animation and responsiveness
@@ -594,6 +722,10 @@ styleEl.innerHTML = `
     .mainGrid {
       grid-template-columns: 1fr !important;
     }
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 `;
 document.head.appendChild(styleEl);
