@@ -205,6 +205,17 @@ app.post('/api/mark-copied', async (req, res) => {
   }
 });
 
+// 4. Clear Database
+app.post('/api/clear-database', async (req, res) => {
+  try {
+    await SitemapUrl.deleteMany({});
+    res.json({ success: true, message: 'Database cleared successfully' });
+  } catch (error) {
+    console.error('Clear database error:', error);
+    res.status(500).json({ error: 'Failed to clear database' });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Backend server listening at http://localhost:${port}`);
 });

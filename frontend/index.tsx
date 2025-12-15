@@ -12,7 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
-  ChevronsRight
+  ChevronsRight,
+  Trash2
 } from 'lucide-react';
 
 // --- Types ---
@@ -24,7 +25,7 @@ interface SitemapUrlItem {
 }
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'success' | 'outline' | 'ghost' | 'secondary';
+  variant?: 'primary' | 'success' | 'outline' | 'ghost' | 'secondary' | 'danger';
   icon?: React.ElementType;
   fullWidth?: boolean;
 }
@@ -39,7 +40,7 @@ const Button: React.FC<ButtonProps> = ({
   onClick, 
   variant = 'primary', 
   disabled = false, 
-  icon: Icon = null,
+  icon: Icon = null, 
   fullWidth = false,
   ...props
 }) => {
@@ -74,6 +75,11 @@ const Button: React.FC<ButtonProps> = ({
       backgroundColor: '#8b5cf6',
       color: 'white',
       boxShadow: '0 4px 6px -1px rgba(139, 92, 246, 0.2)',
+    },
+    danger: {
+      backgroundColor: '#ef4444',
+      color: 'white',
+      boxShadow: '0 4px 6px -1px rgba(239, 68, 68, 0.2)',
     },
     outline: {
       backgroundColor: 'transparent',
@@ -181,12 +187,22 @@ function App() {
         const data = await res.json();
         setUrls(data);
         setCurrentDomain(domain);
-        setCurrentPage(1); // Reset to first page on new data
+        localStorage.setItem('lastDomain', domain); // Persist
+        setCurrentPage(1); 
       }
     } catch (e) {
       console.error(e);
+      showToast('Failed to fetch URLs', 'error');
     }
   }, []);
+
+  // Restore state on load
+  useEffect(() => {
+    const lastDomain = localStorage.getItem('lastDomain');
+    if (lastDomain) {
+      fetchUrls(lastDomain);
+    }
+  }, [fetchUrls]);
 
   const handleExtract = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -266,10 +282,31 @@ function App() {
     }
   };
 
+  const handleClearDatabase = async () => {
+    if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const res = await fetch('http://localhost:5000/api/clear-database', {
+        method: 'POST'
+      });
+      if (res.ok) {
+        setUrls([]);
+        setCurrentDomain('');
+        localStorage.removeItem('lastDomain');
+        showToast('Database cleared successfully.');
+      } else {
+        showToast('Failed to clear database.', 'error');
+      }
+    } catch (e) {
+      showToast('Error connecting to server.', 'error');
+    }
+  };
+
   const handlePageChange = (newPage: number) => {
     if (newPage >= 1 && newPage <= totalPages) {
       setCurrentPage(newPage);
-      // Optional: scroll to top of list
       const listContainer = document.getElementById('url-list-container');
       if (listContainer) listContainer.scrollTop = 0;
     }
@@ -345,6 +382,13 @@ function App() {
             </Card>
           )}
 
+          {/* Database Management */}
+          <Card title="Management" icon={Trash2}>
+             <Button variant="danger" onClick={handleClearDatabase} fullWidth icon={Trash2}>
+                Clear Database
+             </Button>
+          </Card>
+
           {/* Stats */}
           {urls.length > 0 && (
             <div style={styles.statsGrid}>
@@ -367,7 +411,7 @@ function App() {
             {urls.length === 0 ? (
               <div style={styles.emptyState}>
                 <PieChart size={48} color="#d1d5db" />
-                <p>No URLs loaded yet. Enter a sitemap URL to get started.</p>
+                <p>No URLs loaded. Enter a sitemap URL to extract or previous session was cleared.</p>
               </div>
             ) : (
               <>
