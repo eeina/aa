@@ -32,9 +32,6 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   fullWidth?: boolean;
 }
 
-// --- Constants ---
-const ITEMS_PER_PAGE = 50;
-
 // --- Components ---
 
 const Button: React.FC<ButtonProps> = ({ 
@@ -158,40 +155,28 @@ const Notification = ({ message, type }: { message: string, type: string }) => {
 function App() {
   const [sitemapUrl, setSitemapUrl] = useState('');
   const [loading, setLoading] = useState(false);
-  const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
+  const [urls, setUrls] = useState<SitemapUrlItem[]>([]); // Current Page URLs
   const [toast, setToast] = useState({ msg: '', type: '' });
-  const [currentDomain, setCurrentDomain] = useState('');
   const [showRawModal, setShowRawModal] = useState(false);
   
-  // Pagination State
-  const [currentPage, setCurrentPage] = useState(1);
-
-  // Stats
-  const total = urls.length;
-  const copied = urls.filter(u => u.copied).length;
-  const pending = total - copied;
-
-  // Pagination Logic
-  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-  const endIndex = startIndex + ITEMS_PER_PAGE;
-  const displayedUrls = urls.slice(startIndex, endIndex);
+  // Pagination & Stats
+  const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0, pages: 1 });
+  const [stats, setStats] = useState({ totalUrls: 0, pending: 0, copied: 0 });
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast({ msg: '', type: '' }), 4000);
   };
 
-  const fetchUrls = useCallback(async (domain: string) => {
-    if (!domain) return;
+  const fetchUrls = useCallback(async (pageToLoad = 1) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/urls?domain=${encodeURIComponent(domain)}`);
+      // By default we don't send a domain filter, effectively getting "all" URLs.
+      const res = await fetch(`http://localhost:5000/api/urls?page=${pageToLoad}&limit=50`);
       if (res.ok) {
-        const data = await res.json();
-        setUrls(data);
-        setCurrentDomain(domain);
-        localStorage.setItem('lastDomain', domain); // Persist
-        setCurrentPage(1); 
+        const result = await res.json();
+        setUrls(result.data);
+        setPagination(result.pagination);
+        setStats(result.stats);
       }
     } catch (e) {
       console.error(e);
@@ -199,32 +184,9 @@ function App() {
     }
   }, []);
 
-  // Restore state on load - Intelligent handling of backend data
+  // Initialize: Load full database page 1
   useEffect(() => {
-    const initializeData = async () => {
-      let domain = localStorage.getItem('lastDomain');
-      
-      // If no local state, ask server for the most recent work
-      if (!domain) {
-        try {
-          const res = await fetch('http://localhost:5000/api/last-active-domain');
-          if (res.ok) {
-            const data = await res.json();
-            if (data.domain) {
-              domain = data.domain;
-            }
-          }
-        } catch (error) {
-          console.error("Could not fetch last active domain from backend", error);
-        }
-      }
-
-      if (domain) {
-        fetchUrls(domain);
-      }
-    };
-
-    initializeData();
+    fetchUrls(1);
   }, [fetchUrls]);
 
   const handleExtract = async (e: React.FormEvent) => {
@@ -242,7 +204,9 @@ function App() {
       
       if (res.ok) {
         showToast(`Successfully processed. Found ${data.totalUrlsFound} URLs.`);
-        await fetchUrls(data.domain);
+        // Refresh the list (showing full database, page 1 to potentially show new items depending on sort, or just refresh stats)
+        setSitemapUrl('');
+        await fetchUrls(1);
       } else {
         showToast(data.error || 'Extraction failed', 'error');
       }
@@ -253,55 +217,101 @@ function App() {
     }
   };
 
-  const markAsCopied = async (items: SitemapUrlItem[]) => {
-    const idsToUpdate = items.map(i => i.url);
+  const copyBatchText = async (text: string) => {
+     try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      showToast('Clipboard access denied.', 'error');
+      return false;
+    }
+  }
+
+  const markAllPendingAsCopied = async () => {
     try {
       await fetch('http://localhost:5000/api/mark-copied', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls: idsToUpdate }),
+        body: JSON.stringify({ allPending: true }),
       });
-      
-      // Optimistic update
-      setUrls(prev => prev.map(u => 
-        idsToUpdate.includes(u.url) ? { ...u, copied: true } : u
-      ));
+      // Refresh view
+      fetchUrls(pagination.page);
     } catch (e) {
-      console.error('Failed to sync copy status', e);
-      showToast('Failed to update status on server', 'error');
+       showToast('Failed to update status on server', 'error');
     }
-  };
+  }
 
-  const copyBatch = async (batch: SitemapUrlItem[], successMessage: string) => {
-    if (batch.length === 0) return showToast('No pending URLs to copy.', 'error');
+  // Copy ALL pending in the entire database
+  const copyAllPending = async () => {
+    if (stats.pending === 0) return showToast('No pending URLs.', 'error');
 
-    const text = batch.map(u => u.url).join('\n');
+    setLoading(true);
     try {
-      await navigator.clipboard.writeText(text);
-      await markAsCopied(batch);
-      showToast(successMessage);
-    } catch (err) {
-      showToast('Clipboard access denied.', 'error');
+      // Get text from backend
+      const res = await fetch('http://localhost:5000/api/urls/pending');
+      const data = await res.json();
+      
+      if (data.text) {
+        const success = await copyBatchText(data.text);
+        if (success) {
+          await markAllPendingAsCopied();
+          showToast(`Copied ${data.count} URLs!`);
+        }
+      } else {
+        showToast('No URLs to copy', 'error');
+      }
+    } catch (e) {
+      showToast('Failed to fetch pending list', 'error');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const copyAllPending = () => {
-    const pendingUrls = urls.filter(u => !u.copied);
-    copyBatch(pendingUrls, `Copied all ${pendingUrls.length} pending URLs!`);
-  };
+  // Copy current page items
+  const copyPagePending = async () => {
+    const pagePending = urls.filter(u => !u.copied);
+    if (pagePending.length === 0) return showToast('No pending URLs on this page.', 'error');
 
-  const copyPagePending = () => {
-    const pagePending = displayedUrls.filter(u => !u.copied);
-    copyBatch(pagePending, `Copied ${pagePending.length} URLs from this page!`);
+    const text = pagePending.map(u => u.url).join('\n');
+    const success = await copyBatchText(text);
+    if (success) {
+      // Mark these specific URLs as copied
+      try {
+        await fetch('http://localhost:5000/api/mark-copied', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: pagePending.map(u => u.url) }),
+        });
+        
+        // Optimistic UI update
+        setUrls(prev => prev.map(u => ({ ...u, copied: true })));
+        // Also refresh stats slightly
+        setStats(prev => ({ 
+          ...prev, 
+          copied: prev.copied + pagePending.length, 
+          pending: prev.pending - pagePending.length 
+        }));
+        showToast(`Copied ${pagePending.length} URLs from this page!`);
+      } catch (e) {
+         showToast('Failed to update status', 'error');
+      }
+    }
   };
 
   const copySingle = async (item: SitemapUrlItem) => {
-    try {
-      await navigator.clipboard.writeText(item.url);
-      await markAsCopied([item]);
-      showToast('URL copied!');
-    } catch (err) {
-      showToast('Failed to copy', 'error');
+    const success = await copyBatchText(item.url);
+    if (success) {
+       try {
+        await fetch('http://localhost:5000/api/mark-copied', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: [item.url] }),
+        });
+        setUrls(prev => prev.map(u => u._id === item._id ? { ...u, copied: true } : u));
+        showToast('URL copied!');
+      } catch (err) {
+        showToast('Failed to update status', 'error');
+      }
     }
   };
 
@@ -316,8 +326,8 @@ function App() {
       });
       if (res.ok) {
         setUrls([]);
-        setCurrentDomain('');
-        localStorage.removeItem('lastDomain');
+        setStats({ totalUrls: 0, pending: 0, copied: 0 });
+        setPagination({ page: 1, limit: 50, total: 0, pages: 1 });
         showToast('Database cleared successfully.');
       } else {
         showToast('Failed to clear database.', 'error');
@@ -328,8 +338,8 @@ function App() {
   };
 
   const handlePageChange = (newPage: number) => {
-    if (newPage >= 1 && newPage <= totalPages) {
-      setCurrentPage(newPage);
+    if (newPage >= 1 && newPage <= pagination.pages) {
+      fetchUrls(newPage);
       const listContainer = document.getElementById('url-list-container');
       if (listContainer) listContainer.scrollTop = 0;
     }
@@ -341,9 +351,8 @@ function App() {
       <header style={styles.header}>
         <div style={styles.logo}>
           <div style={styles.logoIcon}><Link size={24} color="white" /></div>
-          <h1>Sitemap Manager</h1>
+          <h1>Sitemap Manager (Full DB)</h1>
         </div>
-        {currentDomain && <div style={styles.domainBadge}>{currentDomain}</div>}
       </header>
 
       {/* Main Content */}
@@ -369,23 +378,23 @@ function App() {
             </form>
           </Card>
 
-          {urls.length > 0 && (
+          {stats.totalUrls > 0 && (
             <Card title="Quick Actions" icon={Copy}>
               <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
                 <Button 
                   variant="success" 
                   onClick={copyAllPending} 
-                  disabled={pending === 0} 
+                  disabled={loading || stats.pending === 0} 
                   fullWidth 
                   icon={Copy}
                 >
-                  Copy All Pending ({pending})
+                  {loading ? 'Processing...' : `Copy All Pending (${stats.pending})`}
                 </Button>
                 
                 <Button 
                   variant="secondary" 
                   onClick={copyPagePending} 
-                  disabled={displayedUrls.filter(u => !u.copied).length === 0} 
+                  disabled={urls.filter(u => !u.copied).length === 0} 
                   fullWidth 
                   icon={Copy}
                 >
@@ -398,16 +407,16 @@ function App() {
                   fullWidth 
                   icon={FileText}
                 >
-                  View Raw List
+                  View Page Raw List
                 </Button>
 
                 <div style={styles.progressContainer}>
                   <div style={styles.progressLabel}>
                     <span>Progress</span>
-                    <span>{total > 0 ? Math.round((copied / total) * 100) : 0}%</span>
+                    <span>{stats.totalUrls > 0 ? Math.round((stats.copied / stats.totalUrls) * 100) : 0}%</span>
                   </div>
                   <div style={styles.progressBarBg}>
-                    <div style={{...styles.progressBarFill, width: `${total > 0 ? (copied / total) * 100 : 0}%`}}></div>
+                    <div style={{...styles.progressBarFill, width: `${stats.totalUrls > 0 ? (stats.copied / stats.totalUrls) * 100 : 0}%`}}></div>
                   </div>
                 </div>
               </div>
@@ -417,16 +426,16 @@ function App() {
           {/* Database Management */}
           <Card title="Management" icon={Trash2}>
              <Button variant="danger" onClick={handleClearDatabase} fullWidth icon={Trash2}>
-                Clear Database
+                Clear Full Database
              </Button>
           </Card>
 
           {/* Stats */}
-          {urls.length > 0 && (
+          {stats.totalUrls > 0 && (
             <div style={styles.statsGrid}>
-              <StatBox label="Total URLs" value={total} color="#4f46e5" icon={List} />
-              <StatBox label="Pending" value={pending} color="#f59e0b" icon={AlertCircle} />
-              <StatBox label="Done" value={copied} color="#10b981" icon={CheckCircle} />
+              <StatBox label="Total URLs" value={stats.totalUrls} color="#4f46e5" icon={List} />
+              <StatBox label="Pending" value={stats.pending} color="#f59e0b" icon={AlertCircle} />
+              <StatBox label="Done" value={stats.copied} color="#10b981" icon={CheckCircle} />
             </div>
           )}
         </div>
@@ -437,24 +446,24 @@ function App() {
           
           <Card title="URL Database" icon={List} actions={
             <div style={{fontSize: '0.85rem', color: '#6b7280'}}>
-              Page {currentPage} of {totalPages || 1} • Total {total}
+              Page {pagination.page} of {pagination.pages || 1} • {pagination.total} URLs
             </div>
           }>
-            {urls.length === 0 ? (
+            {stats.totalUrls === 0 ? (
               <div style={styles.emptyState}>
                 <PieChart size={48} color="#d1d5db" />
-                <p>No URLs loaded. Enter a sitemap URL to extract or previous session was cleared.</p>
+                <p>Database is empty. Enter a sitemap URL to populate.</p>
               </div>
             ) : (
               <>
                 <div id="url-list-container" style={styles.list}>
-                  {displayedUrls.map((item, idx) => (
+                  {urls.map((item, idx) => (
                     <div key={item._id} style={{
                       ...styles.listItem,
                       opacity: item.copied ? 0.6 : 1,
                       backgroundColor: item.copied ? '#f9fafb' : 'white',
                     }}>
-                      <div style={styles.listIndex}>#{startIndex + idx + 1}</div>
+                      <div style={styles.listIndex}>#{((pagination.page - 1) * pagination.limit) + idx + 1}</div>
                       <div style={styles.listContent}>
                         <a 
                           href={item.url} 
@@ -465,6 +474,9 @@ function App() {
                         >
                           {item.url} <ExternalLink size={12} />
                         </a>
+                        <div style={{fontSize: '0.75rem', color: '#9ca3af', marginTop: '2px'}}>
+                          {item.sourceDomain}
+                        </div>
                       </div>
                       <div style={styles.listActions}>
                         {item.copied ? (
@@ -480,38 +492,38 @@ function App() {
                 </div>
                 
                 {/* Pagination Controls */}
-                {totalPages > 1 && (
+                {pagination.pages > 1 && (
                   <div style={styles.paginationContainer}>
                     <button 
                       style={styles.pageBtn} 
-                      disabled={currentPage === 1}
+                      disabled={pagination.page === 1}
                       onClick={() => handlePageChange(1)}
                     >
                       <ChevronsLeft size={18} />
                     </button>
                     <button 
                       style={styles.pageBtn} 
-                      disabled={currentPage === 1}
-                      onClick={() => handlePageChange(currentPage - 1)}
+                      disabled={pagination.page === 1}
+                      onClick={() => handlePageChange(pagination.page - 1)}
                     >
                       <ChevronLeft size={18} />
                     </button>
                     
                     <span style={styles.pageInfo}>
-                      Page <strong>{currentPage}</strong> of {totalPages}
+                      Page <strong>{pagination.page}</strong> of {pagination.pages}
                     </span>
 
                     <button 
                       style={styles.pageBtn} 
-                      disabled={currentPage === totalPages}
-                      onClick={() => handlePageChange(currentPage + 1)}
+                      disabled={pagination.page === pagination.pages}
+                      onClick={() => handlePageChange(pagination.page + 1)}
                     >
                       <ChevronRight size={18} />
                     </button>
                     <button 
                       style={styles.pageBtn} 
-                      disabled={currentPage === totalPages}
-                      onClick={() => handlePageChange(totalPages)}
+                      disabled={pagination.page === pagination.pages}
+                      onClick={() => handlePageChange(pagination.pages)}
                     >
                       <ChevronsRight size={18} />
                     </button>
@@ -529,7 +541,7 @@ function App() {
         <div style={styles.modalOverlay}>
           <div style={styles.modalContent}>
             <div style={styles.modalHeader}>
-              <h3 style={styles.modalTitle}>Raw URL List ({urls.length})</h3>
+              <h3 style={styles.modalTitle}>Raw List (Current Page)</h3>
               <Button variant="ghost" onClick={() => setShowRawModal(false)}>
                 <X size={20} />
               </Button>
@@ -544,12 +556,8 @@ function App() {
               <Button variant="outline" onClick={() => setShowRawModal(false)}>
                 Close
               </Button>
-              <Button onClick={() => {
-                navigator.clipboard.writeText(urls.map(u => u.url).join('\n'))
-                  .then(() => showToast('All URLs copied!'))
-                  .catch(() => showToast('Failed to copy', 'error'));
-              }}>
-                Copy All to Clipboard
+              <Button onClick={() => copyBatchText(urls.map(u => u.url).join('\n')).then(() => showToast('Page copied!'))}>
+                Copy Page
               </Button>
             </div>
           </div>

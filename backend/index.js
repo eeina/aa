@@ -172,33 +172,88 @@ app.post('/api/extract-sitemap', async (req, res) => {
   }
 });
 
-// 2. Get all URLs for a specific domain
+// 2. Get URLs (Paginated)
 app.get('/api/urls', async (req, res) => {
+  const { domain, page = 1, limit = 50 } = req.query;
+  
+  const query = {};
+  if (domain) {
+    query.sourceDomain = domain;
+  }
+
+  const pageNum = parseInt(page);
+  const limitNum = parseInt(limit);
+
+  try {
+    const total = await SitemapUrl.countDocuments(query);
+    const pending = await SitemapUrl.countDocuments({ ...query, copied: false });
+    
+    // Sort by _id descending to show newest first, or url ascending. 
+    // Showing newest first helps user see "added" urls.
+    // However, users usually like lists alphabetized. Let's do URL asc for consistency 
+    // but the user asked to "add the url with them", implying aggregation.
+    // Let's stick to alphabetical URL sort which is standard for sitemaps.
+    const urls = await SitemapUrl.find(query)
+      .sort({ url: 1 }) 
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum);
+
+    res.json({
+      data: urls,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(total / limitNum)
+      },
+      stats: {
+        totalUrls: total,
+        pending: pending,
+        copied: total - pending
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch URLs' });
+  }
+});
+
+// 2.5 Get ALL Pending URLs as Text (For "Copy All" button)
+app.get('/api/urls/pending', async (req, res) => {
   const { domain } = req.query;
-  if (!domain) {
-    return res.status(400).json({ error: 'Domain query parameter is required' });
+  const query = { copied: false };
+  if (domain) {
+    query.sourceDomain = domain;
   }
 
   try {
-    const urls = await SitemapUrl.find({ sourceDomain: domain }).sort({ url: 1 });
-    res.json(urls);
+    const urls = await SitemapUrl.find(query).select('url').sort({ url: 1 });
+    const text = urls.map(u => u.url).join('\n');
+    res.json({ text, count: urls.length });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch URLs' });
+    res.status(500).json({ error: 'Failed to fetch pending URLs' });
   }
 });
 
 // 3. Mark URLs as copied
 app.post('/api/mark-copied', async (req, res) => {
-  const { urls } = req.body; // Array of URL strings
-  if (!urls || !Array.isArray(urls)) {
-    return res.status(400).json({ error: 'Invalid URLs array' });
-  }
+  const { urls, allPending, domain } = req.body; 
 
   try {
-    await SitemapUrl.updateMany(
-      { url: { $in: urls } },
-      { $set: { copied: true } }
-    );
+    if (allPending) {
+       // Mark ALL pending matching the query
+       const query = { copied: false };
+       if (domain) query.sourceDomain = domain;
+       await SitemapUrl.updateMany(query, { $set: { copied: true } });
+    } else if (urls && Array.isArray(urls)) {
+       // Mark specific list
+       await SitemapUrl.updateMany(
+        { url: { $in: urls } },
+        { $set: { copied: true } }
+      );
+    } else {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update URL status' });
@@ -216,7 +271,7 @@ app.post('/api/clear-database', async (req, res) => {
   }
 });
 
-// 5. Get Last Active Domain (New Endpoint to help Frontend auto-load)
+// 5. Get Last Active Domain
 app.get('/api/last-active-domain', async (req, res) => {
   try {
     const lastEntry = await SitemapUrl.findOne().sort({ extractedAt: -1 });
