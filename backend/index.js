@@ -3,7 +3,6 @@ import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
-import cheerio from 'cheerio';
 import zlib from 'zlib';
 import cors from 'cors';
 
@@ -29,6 +28,7 @@ const sitemapUrlSchema = new mongoose.Schema({
   url: { type: String, required: true, unique: true },
   sourceDomain: { type: String, required: true },
   extractedAt: { type: Date, default: Date.now },
+  copied: { type: Boolean, default: false } // Track if the user has copied this URL
 });
 
 const SitemapUrl = mongoose.model('SitemapUrl', sitemapUrlSchema);
@@ -70,46 +70,9 @@ async function fetchContent(url) {
 }
 
 /**
- * Extracts sitemap URLs from robots.txt content.
- * @param {string} robotsTxtContent
- * @returns {string[]}
- */
-function getSitemapUrlsFromRobotsTxt(robotsTxtContent) {
-  const sitemapUrls = [];
-  const lines = robotsTxtContent.split('\n');
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    if (trimmedLine.toLowerCase().startsWith('sitemap:')) {
-      const sitemapUrl = trimmedLine.substring('sitemap:'.length).trim();
-      if (sitemapUrl) {
-        sitemapUrls.push(sitemapUrl);
-      }
-    }
-  }
-  return sitemapUrls;
-}
-
-/**
- * Extracts sitemap URLs from HTML content by looking for <link rel="sitemap"> tags.
- * @param {string} htmlContent
- * @returns {string[]}
- */
-function getSitemapUrlsFromHtml(htmlContent) {
-  const sitemapUrls = [];
-  const $ = cheerio.load(htmlContent);
-  $('link[rel="sitemap"]').each((_, element) => {
-    const href = $(element).attr('href');
-    if (href) {
-      sitemapUrls.push(href);
-    }
-  });
-  return sitemapUrls;
-}
-
-/**
  * Recursively extracts all URLs from a sitemap (or sitemap index).
  * @param {string} sitemapUrl
- * @param {Set<string>} extractedUrlsSet - A set to keep track of already extracted URLs to avoid duplicates in recursive calls.
+ * @param {Set<string>} extractedUrlsSet - A set to keep track of already extracted URLs to avoid duplicates.
  * @returns {Promise<string[]>}
  */
 async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
@@ -144,69 +107,40 @@ async function extractUrlsFromSitemap(sitemapUrl, extractedUrlsSet) {
   }
 }
 
-// --- API Endpoint ---
-app.post('/api/extract-sitemap', async (req, res) => {
-  const { url } = req.body;
+// --- API Endpoints ---
 
-  if (!url) {
-    return res.status(400).json({ error: 'URL is required' });
+// 1. Extract URLs from a specific Sitemap XML
+app.post('/api/extract-sitemap', async (req, res) => {
+  const { sitemapUrl } = req.body;
+
+  if (!sitemapUrl) {
+    return res.status(400).json({ error: 'Sitemap URL is required' });
   }
 
   let websiteDomain;
   try {
-    websiteDomain = new URL(url).origin;
+    websiteDomain = new URL(sitemapUrl).origin;
   } catch (error) {
     return res.status(400).json({ error: 'Invalid URL provided' });
   }
 
   const allFoundUrls = new Set();
-  let sitemapDiscoveryUrls = [];
 
   try {
-    // 1. Try to find sitemaps from robots.txt
-    const robotsTxtUrl = `${websiteDomain}/robots.txt`;
-    try {
-      const robotsTxtContent = await fetchContent(robotsTxtUrl);
-      sitemapDiscoveryUrls = getSitemapUrlsFromRobotsTxt(robotsTxtContent);
-    } catch (robotsTxtError) {
-      console.warn(`No robots.txt found or accessible for ${websiteDomain}`);
-      // Continue to HTML parsing if robots.txt fails
+    // Directly process the provided sitemap URL
+    await extractUrlsFromSitemap(sitemapUrl, allFoundUrls);
+
+    if (allFoundUrls.size === 0) {
+      return res.status(404).json({ error: 'No URLs found in the provided sitemap.' });
     }
 
-    // 2. If no sitemaps from robots.txt, try from HTML
-    if (sitemapDiscoveryUrls.length === 0) {
-      try {
-        const htmlContent = await fetchContent(websiteDomain);
-        sitemapDiscoveryUrls = getSitemapUrlsFromHtml(htmlContent);
-      } catch (htmlFetchError) {
-        console.warn(`Could not fetch HTML for ${websiteDomain}: ${htmlFetchError.message}`);
-      }
-    }
-
-    if (sitemapDiscoveryUrls.length === 0) {
-        return res.status(404).json({ error: 'No sitemaps found for the provided URL.' });
-    }
-
-    // 3. Extract URLs from discovered sitemaps
-    const extractedIndividualUrls = [];
-    const processedSitemaps = new Set(); // To avoid processing the same sitemap URL multiple times
-
-    for (const sitemapEntryUrl of sitemapDiscoveryUrls) {
-      if (!processedSitemaps.has(sitemapEntryUrl)) {
-        const urlsFromThisSitemap = await extractUrlsFromSitemap(sitemapEntryUrl, allFoundUrls);
-        extractedIndividualUrls.push(...urlsFromThisSitemap);
-        processedSitemaps.add(sitemapEntryUrl);
-      }
-    }
-    
-    // Note: allFoundUrls is populated by reference inside extractUrlsFromSitemap
-
-    // 4. Store new URLs in MongoDB
+    // Store new URLs in MongoDB
     const newUrlsToStore = [];
     for (const uniqueUrl of allFoundUrls) {
       newUrlsToStore.push({
         url: uniqueUrl,
         sourceDomain: websiteDomain,
+        copied: false
       });
     }
 
@@ -216,25 +150,58 @@ app.post('/api/extract-sitemap', async (req, res) => {
         const insertResult = await SitemapUrl.insertMany(newUrlsToStore, { ordered: false });
         newUrlsStoredCount = insertResult.length;
       } catch (bulkError) {
-        // Handle duplicate key errors gracefully
         if (bulkError.code === 11000) {
           newUrlsStoredCount = bulkError.result.nInserted;
           console.warn(`Encountered duplicate URLs, inserted ${newUrlsStoredCount} new ones.`);
         } else {
-          throw bulkError; // Re-throw other errors
+          throw bulkError;
         }
       }
     }
 
     res.status(200).json({
-      message: `Successfully processed sitemaps for ${websiteDomain}.`,
+      message: `Processed sitemap. Found ${allFoundUrls.size} URLs.`,
       newUrlsStored: newUrlsStoredCount,
       totalUrlsFound: allFoundUrls.size,
+      domain: websiteDomain
     });
 
   } catch (error) {
     console.error('Sitemap extraction API error:', error);
     res.status(500).json({ error: 'Failed to process sitemap.', details: error.message });
+  }
+});
+
+// 2. Get all URLs for a specific domain
+app.get('/api/urls', async (req, res) => {
+  const { domain } = req.query;
+  if (!domain) {
+    return res.status(400).json({ error: 'Domain query parameter is required' });
+  }
+
+  try {
+    const urls = await SitemapUrl.find({ sourceDomain: domain }).sort({ url: 1 });
+    res.json(urls);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch URLs' });
+  }
+});
+
+// 3. Mark URLs as copied
+app.post('/api/mark-copied', async (req, res) => {
+  const { urls } = req.body; // Array of URL strings
+  if (!urls || !Array.isArray(urls)) {
+    return res.status(400).json({ error: 'Invalid URLs array' });
+  }
+
+  try {
+    await SitemapUrl.updateMany(
+      { url: { $in: urls } },
+      { $set: { copied: true } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update URL status' });
   }
 });
 

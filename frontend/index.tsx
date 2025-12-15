@@ -1,26 +1,44 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 
+interface SitemapUrlItem {
+  _id: string;
+  url: string;
+  copied: boolean;
+}
+
 function App() {
-  const [websiteUrl, setWebsiteUrl] = useState<string>('');
+  const [sitemapUrl, setSitemapUrl] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [message, setMessage] = useState<string>('');
-  const [newUrlsStored, setNewUrlsStored] = useState<number | null>(null);
-  const [totalUrlsFound, setTotalUrlsFound] = useState<number | null>(null);
+  const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
+  const [currentDomain, setCurrentDomain] = useState<string>('');
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setWebsiteUrl(event.target.value);
+    setSitemapUrl(event.target.value);
+  };
+
+  const fetchUrls = async (domain: string) => {
+    try {
+      const response = await fetch(`http://localhost:3000/api/urls?domain=${encodeURIComponent(domain)}`);
+      if (response.ok) {
+        const data = await response.json();
+        setUrls(data);
+      }
+    } catch (error) {
+      console.error('Error fetching URLs:', error);
+    }
   };
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoading(true);
     setMessage('');
-    setNewUrlsStored(null);
-    setTotalUrlsFound(null);
+    setUrls([]);
+    setCurrentDomain('');
 
-    if (!websiteUrl) {
-      setMessage('Please enter a website URL.');
+    if (!sitemapUrl) {
+      setMessage('Please enter a Sitemap XML URL.');
       setLoading(false);
       return;
     }
@@ -28,18 +46,16 @@ function App() {
     try {
       const response = await fetch('http://localhost:3000/api/extract-sitemap', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ url: websiteUrl }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sitemapUrl }),
       });
 
       const data = await response.json();
 
       if (response.ok) {
-        setMessage(data.message);
-        setNewUrlsStored(data.newUrlsStored);
-        setTotalUrlsFound(data.totalUrlsFound);
+        setMessage(`${data.message} ${data.newUrlsStored} new URLs added.`);
+        setCurrentDomain(data.domain);
+        await fetchUrls(data.domain);
       } else {
         setMessage(`Error: ${data.error || 'Something went wrong.'}`);
       }
@@ -51,29 +67,93 @@ function App() {
     }
   };
 
+  const handleCopyNext10 = async () => {
+    const uncopiedUrls = urls.filter(u => !u.copied);
+    if (uncopiedUrls.length === 0) return;
+
+    const batch = uncopiedUrls.slice(0, 10);
+    const textToCopy = batch.map(u => u.url).join('\n');
+
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+      
+      // Mark as copied in backend
+      const urlStrings = batch.map(u => u.url);
+      await fetch('http://localhost:3000/api/mark-copied', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: urlStrings }),
+      });
+
+      // Update local state
+      setUrls(prevUrls => prevUrls.map(u => 
+        urlStrings.includes(u.url) ? { ...u, copied: true } : u
+      ));
+
+      setMessage(`Copied ${batch.length} URLs to clipboard!`);
+    } catch (err) {
+      console.error('Failed to copy!', err);
+      setMessage('Failed to copy to clipboard.');
+    }
+  };
+
+  const uncopiedCount = urls.filter(u => !u.copied).length;
+  const copiedCount = urls.filter(u => u.copied).length;
+
   return (
     <div style={styles.container}>
-      <h1 style={styles.header}>Sitemap Extractor</h1>
+      <h1 style={styles.header}>Sitemap URL Manager</h1>
+      
       <form onSubmit={handleSubmit} style={styles.form}>
-        <input
-          type="url"
-          value={websiteUrl}
-          onChange={handleChange}
-          placeholder="Enter website URL (e.g., https://example.com)"
-          aria-label="Website URL"
-          style={styles.input}
-          required
-        />
-        <button type="submit" disabled={loading} style={styles.button}>
-          {loading ? 'Processing...' : 'Extract & Store Sitemaps'}
-        </button>
+        <div style={styles.inputGroup}>
+          <input
+            type="url"
+            value={sitemapUrl}
+            onChange={handleChange}
+            placeholder="Enter Sitemap XML URL (e.g., https://site.com/sitemap.xml)"
+            style={styles.input}
+            required
+          />
+          <button type="submit" disabled={loading} style={styles.button}>
+            {loading ? 'Processing...' : 'Load Sitemap'}
+          </button>
+        </div>
       </form>
 
-      {message && (
-        <div style={styles.message}>
-          <p>{message}</p>
-          {newUrlsStored !== null && <p>New URLs stored: {newUrlsStored}</p>}
-          {totalUrlsFound !== null && <p>Total URLs found: {totalUrlsFound}</p>}
+      {message && <div style={styles.message}>{message}</div>}
+
+      {urls.length > 0 && (
+        <div style={styles.resultsContainer}>
+          <div style={styles.statsBar}>
+            <div style={styles.statItem}>Total: <strong>{urls.length}</strong></div>
+            <div style={styles.statItem}>Copied: <strong style={{color: '#28a745'}}>{copiedCount}</strong></div>
+            <div style={styles.statItem}>Remaining: <strong style={{color: '#dc3545'}}>{uncopiedCount}</strong></div>
+            
+            <button 
+              onClick={handleCopyNext10} 
+              disabled={uncopiedCount === 0}
+              style={{
+                ...styles.copyButton,
+                ...(uncopiedCount === 0 ? styles.buttonDisabled : {})
+              }}
+            >
+              Copy Next 10 Uncopied
+            </button>
+          </div>
+
+          <div style={styles.urlList}>
+            {urls.map((item) => (
+              <div key={item._id} style={{
+                ...styles.urlItem,
+                ...(item.copied ? styles.urlItemCopied : {})
+              }}>
+                <span style={styles.urlText}>{item.url}</span>
+                <span style={styles.statusBadge}>
+                  {item.copied ? '✅ Copied' : '⏳ Pending'}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -82,62 +162,130 @@ function App() {
 
 const styles = {
   container: {
-    fontFamily: 'Arial, sans-serif',
-    maxWidth: '800px',
-    margin: '50px auto',
-    padding: '20px',
-    border: '1px solid #ccc',
-    borderRadius: '8px',
-    boxShadow: '0 2px 10px rgba(0, 0, 0, 0.1)',
-    backgroundColor: '#f9f9f9',
-    textAlign: 'center' as 'center',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    maxWidth: '900px',
+    margin: '40px auto',
+    padding: '25px',
+    backgroundColor: '#fff',
+    borderRadius: '12px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.08)',
   },
   header: {
-    color: '#333',
+    textAlign: 'center' as 'center',
+    color: '#1a1a1a',
     marginBottom: '30px',
+    fontSize: '2rem',
   },
   form: {
-    display: 'flex',
-    flexDirection: 'column' as 'column',
-    gap: '15px',
     marginBottom: '20px',
   },
+  inputGroup: {
+    display: 'flex',
+    gap: '10px',
+  },
   input: {
-    padding: '12px',
+    flex: 1,
+    padding: '15px',
     fontSize: '16px',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-    width: '100%',
-    boxSizing: 'border-box' as 'border-box',
+    border: '2px solid #e1e4e8',
+    borderRadius: '8px',
+    outline: 'none',
+    transition: 'border-color 0.2s',
   },
   button: {
-    padding: '12px 20px',
+    padding: '0 25px',
     fontSize: '16px',
-    backgroundColor: '#007bff',
+    fontWeight: '600',
+    backgroundColor: '#0070f3',
     color: 'white',
     border: 'none',
-    borderRadius: '4px',
+    borderRadius: '8px',
     cursor: 'pointer',
-    transition: 'background-color 0.3s ease',
-  },
-  buttonHover: {
-    backgroundColor: '#0056b3',
-  },
-  buttonDisabled: {
-    backgroundColor: '#cccccc',
-    cursor: 'not-allowed',
+    transition: 'background 0.2s',
   },
   message: {
-    marginTop: '20px',
-    padding: '15px',
-    backgroundColor: '#e9ecef',
-    border: '1px solid #dee2e6',
+    marginBottom: '20px',
+    padding: '12px',
+    backgroundColor: '#f0f9ff',
+    borderLeft: '4px solid #0070f3',
     borderRadius: '4px',
-    color: '#333',
-    textAlign: 'left' as 'left',
+    color: '#004a87',
   },
+  resultsContainer: {
+    borderTop: '1px solid #eaeaea',
+    paddingTop: '20px',
+  },
+  statsBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap' as 'wrap',
+    gap: '15px',
+    marginBottom: '20px',
+    padding: '15px',
+    backgroundColor: '#f8f9fa',
+    borderRadius: '8px',
+    border: '1px solid #eaeaea',
+  },
+  statItem: {
+    fontSize: '1.1rem',
+  },
+  copyButton: {
+    padding: '12px 24px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    backgroundColor: '#28a745',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    boxShadow: '0 2px 4px rgba(40, 167, 69, 0.2)',
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
+    cursor: 'not-allowed',
+    boxShadow: 'none',
+  },
+  urlList: {
+    display: 'flex',
+    flexDirection: 'column' as 'column',
+    gap: '8px',
+    maxHeight: '500px',
+    overflowY: 'auto' as 'auto',
+    border: '1px solid #eaeaea',
+    borderRadius: '8px',
+    padding: '10px',
+    backgroundColor: '#fafafa',
+  },
+  urlItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '12px 15px',
+    backgroundColor: 'white',
+    border: '1px solid #eee',
+    borderRadius: '6px',
+    transition: 'background 0.2s',
+  },
+  urlItemCopied: {
+    backgroundColor: '#f0fff4',
+    borderColor: '#d1e7dd',
+    opacity: 0.8,
+  },
+  urlText: {
+    fontSize: '14px',
+    color: '#333',
+    wordBreak: 'break-all' as 'break-all',
+    marginRight: '15px',
+  },
+  statusBadge: {
+    fontSize: '12px',
+    fontWeight: 'bold',
+    minWidth: '80px',
+    textAlign: 'right' as 'right',
+    color: '#666',
+  }
 };
-
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
