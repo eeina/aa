@@ -8,7 +8,6 @@ import {
   RefreshCw, 
   List, 
   ExternalLink,
-  Trash2,
   PieChart
 } from 'lucide-react';
 
@@ -20,17 +19,24 @@ interface SitemapUrlItem {
   sourceDomain: string;
 }
 
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: 'primary' | 'success' | 'outline' | 'ghost';
+  icon?: React.ElementType;
+  fullWidth?: boolean;
+}
+
 // --- Components ---
 
-const Button = ({ 
+const Button: React.FC<ButtonProps> = ({ 
   children, 
   onClick, 
   variant = 'primary', 
   disabled = false, 
   icon: Icon = null,
-  fullWidth = false 
-}: any) => {
-  const baseStyle = {
+  fullWidth = false,
+  ...props
+}) => {
+  const baseStyle: React.CSSProperties = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -46,7 +52,7 @@ const Button = ({
     width: fullWidth ? '100%' : 'auto',
   };
 
-  const variants: any = {
+  const variants: Record<string, React.CSSProperties> = {
     primary: {
       backgroundColor: '#4f46e5',
       color: 'white',
@@ -74,6 +80,7 @@ const Button = ({
       onClick={onClick} 
       disabled={disabled} 
       style={{...baseStyle, ...variants[variant]}}
+      {...props}
     >
       {Icon && <Icon size={18} />}
       {children}
@@ -110,7 +117,7 @@ const StatBox = ({ label, value, color, icon: Icon }: any) => (
   </div>
 );
 
-const Notification = ({ message, type, onClose }: any) => {
+const Notification = ({ message, type }: { message: string, type: string }) => {
   if (!message) return null;
   const isError = type === 'error';
   return (
@@ -158,8 +165,6 @@ function App() {
       console.error(e);
     }
   }, []);
-
-  // Initial load if we have a stored domain? (Optional, skipping for now)
 
   const handleExtract = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -272,10 +277,10 @@ function App() {
                 <div style={styles.progressContainer}>
                   <div style={styles.progressLabel}>
                     <span>Progress</span>
-                    <span>{Math.round((copied / total) * 100)}%</span>
+                    <span>{total > 0 ? Math.round((copied / total) * 100) : 0}%</span>
                   </div>
                   <div style={styles.progressBarBg}>
-                    <div style={{...styles.progressBarFill, width: `${(copied / total) * 100}%`}}></div>
+                    <div style={{...styles.progressBarFill, width: `${total > 0 ? (copied / total) * 100 : 0}%`}}></div>
                   </div>
                 </div>
               </div>
@@ -343,7 +348,7 @@ function App() {
 
 // --- Styles ---
 
-const styles: any = {
+const styles: Record<string, React.CSSProperties> = {
   container: {
     minHeight: '100vh',
     display: 'flex',
@@ -402,7 +407,7 @@ const styles: any = {
     display: 'flex',
     flexDirection: 'column',
     gap: '24px',
-    minWidth: 0, // Flexbox fix for text overflow
+    minWidth: 0,
   },
   card: {
     backgroundColor: 'white',
@@ -452,7 +457,7 @@ const styles: any = {
     fontSize: '0.95rem',
     outline: 'none',
     transition: 'border-color 0.15s',
-  },
+  } as React.CSSProperties, // Cast to any or explicit style
   statsGrid: {
     display: 'grid',
     gridTemplateColumns: '1fr',
@@ -593,8 +598,7 @@ styleEl.innerHTML = `
 `;
 document.head.appendChild(styleEl);
 
-const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-root.render(
+ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
