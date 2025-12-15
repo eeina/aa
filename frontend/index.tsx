@@ -199,12 +199,32 @@ function App() {
     }
   }, []);
 
-  // Restore state on load
+  // Restore state on load - Intelligent handling of backend data
   useEffect(() => {
-    const lastDomain = localStorage.getItem('lastDomain');
-    if (lastDomain) {
-      fetchUrls(lastDomain);
-    }
+    const initializeData = async () => {
+      let domain = localStorage.getItem('lastDomain');
+      
+      // If no local state, ask server for the most recent work
+      if (!domain) {
+        try {
+          const res = await fetch('http://localhost:5000/api/last-active-domain');
+          if (res.ok) {
+            const data = await res.json();
+            if (data.domain) {
+              domain = data.domain;
+            }
+          }
+        } catch (error) {
+          console.error("Could not fetch last active domain from backend", error);
+        }
+      }
+
+      if (domain) {
+        fetchUrls(domain);
+      }
+    };
+
+    initializeData();
   }, [fetchUrls]);
 
   const handleExtract = async (e: React.FormEvent) => {

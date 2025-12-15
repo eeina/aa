@@ -216,6 +216,21 @@ app.post('/api/clear-database', async (req, res) => {
   }
 });
 
+// 5. Get Last Active Domain (New Endpoint to help Frontend auto-load)
+app.get('/api/last-active-domain', async (req, res) => {
+  try {
+    const lastEntry = await SitemapUrl.findOne().sort({ extractedAt: -1 });
+    if (lastEntry) {
+      res.json({ domain: lastEntry.sourceDomain });
+    } else {
+      res.json({ domain: null });
+    }
+  } catch (error) {
+    console.error('Error fetching last domain:', error);
+    res.status(500).json({ error: 'Failed to fetch last domain' });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Backend server listening at http://localhost:${port}`);
 });
