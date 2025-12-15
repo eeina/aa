@@ -172,13 +172,25 @@ app.post('/api/extract-sitemap', async (req, res) => {
   }
 });
 
-// 2. Get URLs (Paginated)
+// 2. Get URLs (Paginated & Filtered)
 app.get('/api/urls', async (req, res) => {
-  const { domain, page = 1, limit = 50 } = req.query;
+  const { domain, page = 1, limit = 50, status, search } = req.query;
   
   const query = {};
   if (domain) {
     query.sourceDomain = domain;
+  }
+
+  // Status Filter
+  if (status === 'pending') {
+    query.copied = false;
+  } else if (status === 'copied') {
+    query.copied = true;
+  }
+
+  // Search Filter (Regex)
+  if (search) {
+    query.url = { $regex: search, $options: 'i' };
   }
 
   const pageNum = parseInt(page);
@@ -186,13 +198,10 @@ app.get('/api/urls', async (req, res) => {
 
   try {
     const total = await SitemapUrl.countDocuments(query);
-    const pending = await SitemapUrl.countDocuments({ ...query, copied: false });
+    // Get total stats for the whole DB regardless of filter, so the boxes remain accurate
+    const totalDb = await SitemapUrl.countDocuments({});
+    const pendingDb = await SitemapUrl.countDocuments({ copied: false });
     
-    // Sort by _id descending to show newest first, or url ascending. 
-    // Showing newest first helps user see "added" urls.
-    // However, users usually like lists alphabetized. Let's do URL asc for consistency 
-    // but the user asked to "add the url with them", implying aggregation.
-    // Let's stick to alphabetical URL sort which is standard for sitemaps.
     const urls = await SitemapUrl.find(query)
       .sort({ url: 1 }) 
       .skip((pageNum - 1) * limitNum)
@@ -207,9 +216,9 @@ app.get('/api/urls', async (req, res) => {
         pages: Math.ceil(total / limitNum)
       },
       stats: {
-        totalUrls: total,
-        pending: pending,
-        copied: total - pending
+        totalUrls: totalDb,
+        pending: pendingDb,
+        copied: totalDb - pendingDb
       }
     });
   } catch (error) {
@@ -218,12 +227,17 @@ app.get('/api/urls', async (req, res) => {
   }
 });
 
-// 2.5 Get Pending URLs as Text (Supports limit)
+// 2.5 Get Pending URLs as Text (Supports limit & search)
 app.get('/api/urls/pending', async (req, res) => {
-  const { domain, limit } = req.query;
+  const { domain, limit, search } = req.query;
   const query = { copied: false };
+  
   if (domain) {
     query.sourceDomain = domain;
+  }
+
+  if (search) {
+    query.url = { $regex: search, $options: 'i' };
   }
 
   try {
@@ -246,13 +260,15 @@ app.get('/api/urls/pending', async (req, res) => {
 
 // 3. Mark URLs as copied
 app.post('/api/mark-copied', async (req, res) => {
-  const { urls, allPending, domain } = req.body; 
+  const { urls, allPending, domain, search } = req.body; 
 
   try {
     if (allPending) {
-       // Mark ALL pending matching the query
+       // Mark ALL pending matching the query (including search if provided)
        const query = { copied: false };
        if (domain) query.sourceDomain = domain;
+       if (search) query.url = { $regex: search, $options: 'i' };
+       
        await SitemapUrl.updateMany(query, { $set: { copied: true } });
     } else if (urls && Array.isArray(urls)) {
        // Mark specific list

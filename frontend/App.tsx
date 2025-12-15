@@ -15,7 +15,8 @@ import {
   Trash2,
   FileText,
   X,
-  ClipboardList
+  ClipboardList,
+  Search
 } from 'lucide-react';
 
 import { SitemapUrlItem } from './types';
@@ -32,6 +33,10 @@ export default function App() {
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [showRawModal, setShowRawModal] = useState(false);
   
+  // Filters
+  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'copied'>('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  
   // Pagination & Stats
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0, pages: 1 });
   const [stats, setStats] = useState({ totalUrls: 0, pending: 0, copied: 0 });
@@ -43,8 +48,14 @@ export default function App() {
 
   const fetchUrls = useCallback(async (pageToLoad = 1) => {
     try {
-      // By default we don't send a domain filter, effectively getting "all" URLs.
-      const res = await fetch(`http://localhost:5000/api/urls?page=${pageToLoad}&limit=50`);
+      const queryParams = new URLSearchParams({
+        page: pageToLoad.toString(),
+        limit: '50',
+        status: filterStatus,
+        search: searchTerm
+      });
+
+      const res = await fetch(`http://localhost:5000/api/urls?${queryParams}`);
       if (res.ok) {
         const result = await res.json();
         setUrls(result.data);
@@ -55,9 +66,9 @@ export default function App() {
       console.error(e);
       showToast('Failed to fetch URLs', 'error');
     }
-  }, []);
+  }, [filterStatus, searchTerm]);
 
-  // Initialize: Load full database page 1
+  // Debounced Search Effect or just Effect on filter change
   useEffect(() => {
     fetchUrls(1);
   }, [fetchUrls]);
@@ -77,7 +88,6 @@ export default function App() {
       
       if (res.ok) {
         showToast(`Successfully processed. Found ${data.totalUrlsFound} URLs.`);
-        // Refresh the list (showing full database, page 1 to potentially show new items depending on sort, or just refresh stats)
         setSitemapUrl('');
         await fetchUrls(1);
       } else {
@@ -105,7 +115,10 @@ export default function App() {
       await fetch('http://localhost:5000/api/mark-copied', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allPending: true }),
+        body: JSON.stringify({ 
+          allPending: true,
+          search: searchTerm // Respect search filter when marking all
+        }),
       });
       // Refresh view
       fetchUrls(pagination.page);
@@ -114,13 +127,21 @@ export default function App() {
     }
   }
 
-  // Copy specific next N pending URLs
+  // Copy specific next N pending URLs (respecting current search filter)
   const copyNextBatch = async (amount: number) => {
-    if (stats.pending === 0) return showToast('No pending URLs.', 'error');
+    // If filtering by copied, we can't copy pending!
+    if (filterStatus === 'copied') {
+      return showToast('Switch to Pending or All to copy URLs.', 'error');
+    }
 
     setLoading(true);
     try {
-      const res = await fetch(`http://localhost:5000/api/urls/pending?limit=${amount}`);
+      const queryParams = new URLSearchParams({
+        limit: amount.toString(),
+        search: searchTerm
+      });
+      
+      const res = await fetch(`http://localhost:5000/api/urls/pending?${queryParams}`);
       const data = await res.json();
       
       if (data.urls && data.urls.length > 0) {
@@ -132,18 +153,16 @@ export default function App() {
             body: JSON.stringify({ urls: data.urls }),
           });
           
-          // Optimistic Update for UI responsiveness
+          // Optimistic Update
           setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
-          setStats(prev => ({
-             ...prev,
-             copied: prev.copied + data.count,
-             pending: prev.pending - data.count
-          }));
+          
+          // Refetch stats to be accurate
+          fetchUrls(pagination.page);
           
           showToast(`Copied next ${data.count} URLs!`);
         }
       } else {
-        showToast('No uncopied URLs available.', 'error');
+        showToast('No uncopied URLs matching your filter.', 'error');
       }
     } catch (e) {
       showToast('Failed to fetch batch', 'error');
@@ -152,14 +171,16 @@ export default function App() {
     }
   };
 
-  // Copy ALL pending in the entire database
+  // Copy ALL pending (respecting filter)
   const copyAllPending = async () => {
-    if (stats.pending === 0) return showToast('No pending URLs.', 'error');
+    if (filterStatus === 'copied') return;
 
     setLoading(true);
     try {
-      // Get text from backend
-      const res = await fetch('http://localhost:5000/api/urls/pending');
+      const queryParams = new URLSearchParams({
+        search: searchTerm
+      });
+      const res = await fetch(`http://localhost:5000/api/urls/pending?${queryParams}`);
       const data = await res.json();
       
       if (data.text) {
@@ -186,7 +207,6 @@ export default function App() {
     const text = pagePending.map(u => u.url).join('\n');
     const success = await copyBatchText(text);
     if (success) {
-      // Mark these specific URLs as copied
       try {
         await fetch('http://localhost:5000/api/mark-copied', {
           method: 'POST',
@@ -194,14 +214,8 @@ export default function App() {
           body: JSON.stringify({ urls: pagePending.map(u => u.url) }),
         });
         
-        // Optimistic UI update
         setUrls(prev => prev.map(u => ({ ...u, copied: true })));
-        // Also refresh stats slightly
-        setStats(prev => ({ 
-          ...prev, 
-          copied: prev.copied + pagePending.length, 
-          pending: prev.pending - pagePending.length 
-        }));
+        fetchUrls(pagination.page); // Refresh stats
         showToast(`Copied ${pagePending.length} URLs from this page!`);
       } catch (e) {
          showToast('Failed to update status', 'error');
@@ -262,7 +276,7 @@ export default function App() {
       <header style={styles.header}>
         <div style={styles.logo}>
           <div style={styles.logoIcon}><Link size={24} color="white" /></div>
-          <h1>Sitemap Manager (Full DB)</h1>
+          <h1>Sitemap Manager</h1>
         </div>
       </header>
 
@@ -295,21 +309,21 @@ export default function App() {
                 <Button 
                   variant="primary" 
                   onClick={() => copyNextBatch(10)} 
-                  disabled={loading || stats.pending === 0} 
+                  disabled={loading || (filterStatus === 'copied')} 
                   fullWidth 
                   icon={ClipboardList}
                 >
-                  Copy Next 10 Pending
+                  Copy Next 10 Pending {searchTerm ? '(Filtered)' : ''}
                 </Button>
 
                 <Button 
                   variant="success" 
                   onClick={copyAllPending} 
-                  disabled={loading || stats.pending === 0} 
+                  disabled={loading || (filterStatus === 'copied')} 
                   fullWidth 
                   icon={Copy}
                 >
-                  {loading ? 'Processing...' : `Copy All Pending (${stats.pending})`}
+                  {loading ? 'Processing...' : `Copy All Pending ${searchTerm ? '(Filtered)' : ''}`}
                 </Button>
                 
                 <Button 
@@ -333,7 +347,7 @@ export default function App() {
 
                 <div style={styles.progressContainer}>
                   <div style={styles.progressLabel}>
-                    <span>Progress</span>
+                    <span>Progress (Total DB)</span>
                     <span>{stats.totalUrls > 0 ? Math.round((stats.copied / stats.totalUrls) * 100) : 0}%</span>
                   </div>
                   <div style={styles.progressBarBg}>
@@ -365,11 +379,47 @@ export default function App() {
         <div style={styles.columnWide}>
           <Notification message={toast.msg} type={toast.type} />
           
-          <Card title="URL Database" icon={List} actions={
-            <div style={{fontSize: '0.85rem', color: '#6b7280'}}>
-              Page {pagination.page} of {pagination.pages || 1} • {pagination.total} URLs
+          <Card title="URL Database" icon={List}>
+            {/* Filter Bar */}
+            <div style={{padding: '0 20px'}}>
+              <div style={styles.filterBar}>
+                {/* Status Tabs */}
+                <div style={styles.tabs}>
+                  {(['all', 'pending', 'copied'] as const).map(status => (
+                    <button
+                      key={status}
+                      onClick={() => setFilterStatus(status)}
+                      style={{
+                        ...styles.tab,
+                        ...(filterStatus === status ? styles.activeTab : styles.inactiveTab)
+                      }}
+                    >
+                      {status.charAt(0).toUpperCase() + status.slice(1)}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Search Input */}
+                <div style={styles.searchContainer}>
+                  <Search size={16} style={styles.searchIcon} />
+                  <input
+                    type="text"
+                    placeholder="Filter URLs (e.g. recipe)"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    style={styles.searchInput}
+                  />
+                </div>
+              </div>
             </div>
-          }>
+
+            <div style={{...styles.cardHeader, borderTop: '1px solid #f3f4f6', paddingTop: '10px'}}>
+               <div style={{fontSize: '0.85rem', color: '#6b7280'}}>
+                Showing {pagination.total} result{pagination.total !== 1 ? 's' : ''} • Page {pagination.page} of {pagination.pages || 1}
+              </div>
+            </div>
+
+            {/* List */}
             {stats.totalUrls === 0 ? (
               <div style={styles.emptyState}>
                 <PieChart size={48} color="#d1d5db" />
@@ -378,6 +428,11 @@ export default function App() {
             ) : (
               <>
                 <div id="url-list-container" style={styles.list}>
+                  {urls.length === 0 && (
+                     <div style={styles.emptyState}>
+                        <p>No URLs match your current filters.</p>
+                     </div>
+                  )}
                   {urls.map((item, idx) => (
                     <div key={item._id} style={{
                       ...styles.listItem,
