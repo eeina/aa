@@ -20,7 +20,7 @@ function App() {
 
   const fetchUrls = async (domain: string) => {
     try {
-      const response = await fetch(`http://localhost:3000/api/urls?domain=${encodeURIComponent(domain)}`);
+      const response = await fetch(`http://localhost:5000/api/urls?domain=${encodeURIComponent(domain)}`);
       if (response.ok) {
         const data = await response.json();
         setUrls(data);
@@ -44,7 +44,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:3000/api/extract-sitemap', {
+      const response = await fetch('http://localhost:5000/api/extract-sitemap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sitemapUrl }),
@@ -79,7 +79,7 @@ function App() {
       
       // Mark as copied in backend
       const urlStrings = batch.map(u => u.url);
-      await fetch('http://localhost:3000/api/mark-copied', {
+      await fetch('http://localhost:5000/api/mark-copied', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ urls: urlStrings }),

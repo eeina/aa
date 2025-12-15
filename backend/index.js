@@ -7,7 +7,7 @@ import zlib from 'zlib';
 import cors from 'cors';
 
 const app = express();
-const port = 3000;
+const port = 5000; // Changed to 5000 to avoid conflict with Frontend (Vite)
 
 app.use(cors()); // Enable CORS for all routes
 app.use(express.json()); // For parsing application/json requests
