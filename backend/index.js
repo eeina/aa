@@ -402,6 +402,57 @@ app.post('/api/mark-copied', async (req, res) => {
   }
 });
 
+// 3.5 Process Quality Check Batch
+app.post('/api/sitemaps/process-quality', async (req, res) => {
+  const { parentSitemap, limit } = req.body;
+
+  if (!parentSitemap || !limit) {
+    return res.status(400).json({ error: 'Sitemap URL and limit are required' });
+  }
+
+  try {
+    // 1. Find pending URLs for this sitemap
+    const candidates = await SitemapUrl.find({ 
+      parentSitemap: parentSitemap, 
+      copied: false 
+    }).limit(parseInt(limit));
+
+    if (candidates.length === 0) {
+      return res.json({ text: '', count: 0, processedCount: 0 });
+    }
+
+    // 2. Run quality checks in parallel
+    const results = await Promise.all(candidates.map(async (doc) => {
+      const isQuality = await checkUrlQuality(doc.url);
+      return { url: doc.url, isQuality };
+    }));
+
+    // 3. Filter passing URLs
+    const passingUrls = results.filter(r => r.isQuality).map(r => r.url);
+    
+    // 4. Mark ALL candidates as copied (so we don't process failed ones again)
+    // Note: User can always reset DB or we could add a 'skipped' status later, 
+    // but per prompt requirements we just filter the output for copying.
+    const allProcessedUrls = candidates.map(c => c.url);
+    await SitemapUrl.updateMany(
+      { url: { $in: allProcessedUrls } },
+      { $set: { copied: true } }
+    );
+
+    const text = passingUrls.join('\n');
+    res.json({ 
+      text, 
+      count: passingUrls.length, 
+      processedCount: allProcessedUrls.length,
+      urls: passingUrls
+    });
+
+  } catch (error) {
+    console.error('Quality process error:', error);
+    res.status(500).json({ error: 'Failed to process quality check' });
+  }
+});
+
 // 4. Delete Single URL
 app.delete('/api/urls/:id', async (req, res) => {
   try {
