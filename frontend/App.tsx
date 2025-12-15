@@ -177,6 +177,7 @@ export default function App() {
           
           setUrls(prev => prev.map(u => data.urls.includes(u.url) ? { ...u, copied: true } : u));
           fetchUrls(pagination.page);
+          fetchSitemaps(); // Refresh sitemap stats
           showToast(`Copied next ${data.count} URLs!`);
         } catch(e) {
           showToast('Clipboard denied', 'error');
@@ -206,6 +207,7 @@ export default function App() {
         try {
           await navigator.clipboard.writeText(data.text);
           await markAllPendingAsCopied();
+          fetchSitemaps(); // Refresh stats
           showToast(`Copied ${data.count} URLs!`);
         } catch(e) {
           showToast('Clipboard denied', 'error');
@@ -235,6 +237,7 @@ export default function App() {
       
       setUrls(prev => prev.map(u => ({ ...u, copied: true })));
       fetchUrls(pagination.page);
+      fetchSitemaps();
       showToast(`Copied ${pagePending.length} URLs from this page!`);
     } catch (e) {
        showToast('Failed to copy or update', 'error');
@@ -250,6 +253,7 @@ export default function App() {
         body: JSON.stringify({ urls: [item.url] }),
       });
       setUrls(prev => prev.map(u => u._id === item._id ? { ...u, copied: true } : u));
+      fetchSitemaps(); // Refresh sitemap stats since one was copied
       showToast('URL copied!');
     } catch (err) {
       showToast('Failed to copy', 'error');
@@ -262,6 +266,7 @@ export default function App() {
       const res = await fetch(`http://localhost:5000/api/urls/${id}`, { method: 'DELETE' });
       if (res.ok) {
         await fetchUrls(pagination.page);
+        await fetchSitemaps(); // Refresh stats
         showToast('URL deleted');
       } else {
         showToast('Failed to delete', 'error');
@@ -303,6 +308,82 @@ export default function App() {
       }
     } catch(e) {
        showToast('Connection error', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- Per-Sitemap Quick Actions ---
+
+  const copySitemapNextBatch = async (parentSitemap: string, amount: number) => {
+    setLoading(true);
+    try {
+      const queryParams = new URLSearchParams({
+        limit: amount.toString(),
+        parentSitemap // Filter by sitemap
+      });
+      
+      const res = await fetch(`http://localhost:5000/api/urls/pending?${queryParams}`);
+      const data = await res.json();
+      
+      if (data.urls && data.urls.length > 0) {
+        await navigator.clipboard.writeText(data.text);
+        
+        // Mark as copied
+        await fetch('http://localhost:5000/api/mark-copied', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: data.urls }),
+        });
+        
+        // Update UI
+        await fetchSitemaps(); 
+        if (activeTab === 'urls') fetchUrls(pagination.page);
+        
+        showToast(`Copied next ${data.count} URLs from selected sitemap!`);
+      } else {
+        showToast('No pending URLs in this sitemap.', 'error');
+      }
+    } catch (e) {
+      showToast('Failed to process batch', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copySitemapPending = async (parentSitemap: string) => {
+    setLoading(true);
+    try {
+      const queryParams = new URLSearchParams({
+        parentSitemap // Filter by sitemap
+      });
+      
+      const res = await fetch(`http://localhost:5000/api/urls/pending?${queryParams}`);
+      const data = await res.json();
+      
+      if (data.urls && data.urls.length > 0) {
+        await navigator.clipboard.writeText(data.text);
+        
+        // Mark All Pending in this sitemap
+        await fetch('http://localhost:5000/api/mark-copied', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            allPending: true,
+            parentSitemap
+          }),
+        });
+
+        // Update UI
+        await fetchSitemaps();
+        if (activeTab === 'urls') fetchUrls(pagination.page);
+
+        showToast(`Copied all ${data.count} pending URLs!`);
+      } else {
+        showToast('No pending URLs in this sitemap.', 'error');
+      }
+    } catch (e) {
+      showToast('Failed to process pending list', 'error');
     } finally {
       setLoading(false);
     }
@@ -412,6 +493,8 @@ export default function App() {
               sitemaps={sitemaps}
               onCopy={copyBatchText}
               onCopyUrls={copySitemapChildUrls}
+              onCopyNextBatch={copySitemapNextBatch}
+              onCopyPending={copySitemapPending}
               onDelete={deleteSitemap}
             />
           )}

@@ -292,12 +292,11 @@ app.post('/api/extract-sitemap', async (req, res) => {
 
 // 2. Get URLs (Paginated & Filtered)
 app.get('/api/urls', async (req, res) => {
-  const { domain, page = 1, limit = 50, status, search } = req.query;
+  const { domain, page = 1, limit = 50, status, search, parentSitemap } = req.query;
   
   const query = {};
-  if (domain) {
-    query.sourceDomain = domain;
-  }
+  if (domain) query.sourceDomain = domain;
+  if (parentSitemap) query.parentSitemap = parentSitemap;
 
   // Status Filter
   if (status === 'pending') {
@@ -345,14 +344,13 @@ app.get('/api/urls', async (req, res) => {
   }
 });
 
-// 2.5 Get Pending URLs as Text (Supports limit & search)
+// 2.5 Get Pending URLs as Text (Supports limit & search & parentSitemap)
 app.get('/api/urls/pending', async (req, res) => {
-  const { domain, limit, search } = req.query;
+  const { domain, limit, search, parentSitemap } = req.query;
   const query = { copied: false };
   
-  if (domain) {
-    query.sourceDomain = domain;
-  }
+  if (domain) query.sourceDomain = domain;
+  if (parentSitemap) query.parentSitemap = parentSitemap;
 
   if (search) {
     query.url = { $regex: search, $options: 'i' };
@@ -378,13 +376,14 @@ app.get('/api/urls/pending', async (req, res) => {
 
 // 3. Mark URLs as copied
 app.post('/api/mark-copied', async (req, res) => {
-  const { urls, allPending, domain, search } = req.body; 
+  const { urls, allPending, domain, search, parentSitemap } = req.body; 
 
   try {
     if (allPending) {
        // Mark ALL pending matching the query (including search if provided)
        const query = { copied: false };
        if (domain) query.sourceDomain = domain;
+       if (parentSitemap) query.parentSitemap = parentSitemap;
        if (search) query.url = { $regex: search, $options: 'i' };
        
        await SitemapUrl.updateMany(query, { $set: { copied: true } });
@@ -444,11 +443,25 @@ app.get('/api/last-active-domain', async (req, res) => {
 
 // --- SITEMAP MANAGEMENT ENDPOINTS ---
 
-// 7. Get Sitemaps (XML Files)
+// 7. Get Sitemaps (XML Files) with stats
 app.get('/api/sitemaps', async (req, res) => {
   try {
-    const sitemaps = await SitemapFile.find().sort({ foundAt: -1 });
-    res.json({ data: sitemaps });
+    const sitemaps = await SitemapFile.find().sort({ foundAt: -1 }).lean();
+    
+    // Enrich with stats
+    // Note: iterating and counting for each sitemap might be slow if there are hundreds of sitemaps.
+    // Ideally use aggregation, but for simplicity/safety in this context we map.
+    const data = await Promise.all(sitemaps.map(async (sm) => {
+      const total = await SitemapUrl.countDocuments({ parentSitemap: sm.url });
+      const pending = await SitemapUrl.countDocuments({ parentSitemap: sm.url, copied: false });
+      return { 
+        ...sm, 
+        _id: sm._id.toString(), 
+        stats: { total, pending, copied: total - pending } 
+      };
+    }));
+
+    res.json({ data });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch sitemaps' });

@@ -10,4 +10,9 @@ export interface SitemapFileItem {
   url: string;
   sourceDomain: string;
   foundAt: string;
+  stats?: {
+    total: number;
+    pending: number;
+    copied: number;
+  }
 }
