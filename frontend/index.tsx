@@ -13,7 +13,9 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  Trash2
+  Trash2,
+  FileText,
+  X
 } from 'lucide-react';
 
 // --- Types ---
@@ -159,6 +161,7 @@ function App() {
   const [urls, setUrls] = useState<SitemapUrlItem[]>([]);
   const [toast, setToast] = useState({ msg: '', type: '' });
   const [currentDomain, setCurrentDomain] = useState('');
+  const [showRawModal, setShowRawModal] = useState(false);
   
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -369,6 +372,15 @@ function App() {
                   Copy This Page
                 </Button>
 
+                <Button 
+                  variant="outline" 
+                  onClick={() => setShowRawModal(true)} 
+                  fullWidth 
+                  icon={FileText}
+                >
+                  View Raw List
+                </Button>
+
                 <div style={styles.progressContainer}>
                   <div style={styles.progressLabel}>
                     <span>Progress</span>
@@ -424,7 +436,13 @@ function App() {
                     }}>
                       <div style={styles.listIndex}>#{startIndex + idx + 1}</div>
                       <div style={styles.listContent}>
-                        <a href={item.url} target="_blank" rel="noreferrer" style={styles.link}>
+                        <a 
+                          href={item.url} 
+                          target="_blank" 
+                          rel="noreferrer" 
+                          style={styles.link}
+                          title={item.url}
+                        >
                           {item.url} <ExternalLink size={12} />
                         </a>
                       </div>
@@ -485,6 +503,39 @@ function App() {
         </div>
 
       </main>
+
+      {/* Raw Data Modal */}
+      {showRawModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modalContent}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Raw URL List ({urls.length})</h3>
+              <Button variant="ghost" onClick={() => setShowRawModal(false)}>
+                <X size={20} />
+              </Button>
+            </div>
+            <textarea
+              readOnly
+              value={urls.map(u => u.url).join('\n')}
+              style={styles.rawTextarea}
+              onClick={(e) => e.currentTarget.select()}
+            />
+            <div style={styles.modalActions}>
+              <Button variant="outline" onClick={() => setShowRawModal(false)}>
+                Close
+              </Button>
+              <Button onClick={() => {
+                navigator.clipboard.writeText(urls.map(u => u.url).join('\n'))
+                  .then(() => showToast('All URLs copied!'))
+                  .catch(() => showToast('Failed to copy', 'error'));
+              }}>
+                Copy All to Clipboard
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -752,7 +803,65 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#374151',
     minWidth: '100px',
     textAlign: 'center' as 'center',
-  }
+  },
+  modalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+    backdropFilter: 'blur(4px)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+    width: '90%',
+    maxWidth: '600px',
+    display: 'flex',
+    flexDirection: 'column',
+    maxHeight: '85vh',
+  },
+  modalHeader: {
+    padding: '16px 24px',
+    borderBottom: '1px solid #e5e7eb',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    margin: 0,
+    fontSize: '1.1rem',
+    fontWeight: '600',
+    color: '#111827',
+  },
+  rawTextarea: {
+    flex: 1,
+    margin: '20px',
+    padding: '12px',
+    border: '1px solid #d1d5db',
+    borderRadius: '8px',
+    fontFamily: 'monospace',
+    fontSize: '0.85rem',
+    resize: 'none',
+    minHeight: '300px',
+    outline: 'none',
+  },
+  modalActions: {
+    padding: '16px 24px',
+    borderTop: '1px solid #e5e7eb',
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '12px',
+    backgroundColor: '#f9fafb',
+    borderBottomLeftRadius: '12px',
+    borderBottomRightRadius: '12px',
+  },
 };
 
 // Add global styles for animation and responsiveness
