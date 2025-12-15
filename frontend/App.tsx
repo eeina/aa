@@ -229,6 +229,23 @@ export default function App() {
     }
   };
 
+  const deleteUrl = async (id: string) => {
+    if (!window.confirm("Delete this URL?")) return;
+    try {
+      const res = await fetch(`http://localhost:5000/api/urls/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        // Optimistic UI update or Refetch
+        // We'll refetch to keep pagination accurate
+        await fetchUrls(pagination.page);
+        showToast('URL deleted');
+      } else {
+        showToast('Failed to delete', 'error');
+      }
+    } catch (e) {
+      showToast('Error connecting to server', 'error');
+    }
+  };
+
   const handleClearDatabase = async () => {
     if (!window.confirm("Are you sure you want to delete ALL data? This cannot be undone.")) return;
 
@@ -304,6 +321,7 @@ export default function App() {
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
             onCopySingle={copySingle}
+            onDeleteSingle={deleteUrl}
             onPageChange={handlePageChange}
           />
         </div>

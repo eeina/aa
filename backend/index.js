@@ -369,7 +369,19 @@ app.post('/api/mark-copied', async (req, res) => {
   }
 });
 
-// 4. Clear Database
+// 4. Delete Single URL
+app.delete('/api/urls/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await SitemapUrl.findByIdAndDelete(id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete error:', error);
+    res.status(500).json({ error: 'Failed to delete URL' });
+  }
+});
+
+// 5. Clear Database
 app.post('/api/clear-database', async (req, res) => {
   try {
     await SitemapUrl.deleteMany({});
@@ -380,7 +392,7 @@ app.post('/api/clear-database', async (req, res) => {
   }
 });
 
-// 5. Get Last Active Domain
+// 6. Get Last Active Domain
 app.get('/api/last-active-domain', async (req, res) => {
   try {
     const lastEntry = await SitemapUrl.findOne().sort({ extractedAt: -1 });

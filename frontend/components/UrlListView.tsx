@@ -8,7 +8,8 @@ import {
   ChevronLeft, 
   ChevronRight, 
   ChevronsLeft, 
-  ChevronsRight 
+  ChevronsRight,
+  Trash2
 } from 'lucide-react';
 import { Card } from './Card';
 import { Button } from './Button';
@@ -23,6 +24,7 @@ interface UrlListViewProps {
   searchTerm: string;
   setSearchTerm: (term: string) => void;
   onCopySingle: (item: SitemapUrlItem) => void;
+  onDeleteSingle: (id: string) => void;
   onPageChange: (page: number) => void;
 }
 
@@ -35,6 +37,7 @@ export const UrlListView = ({
   searchTerm,
   setSearchTerm,
   onCopySingle,
+  onDeleteSingle,
   onPageChange
 }: UrlListViewProps) => {
 
@@ -150,14 +153,17 @@ export const UrlListView = ({
                     {item.sourceDomain}
                   </div>
                 </div>
-                <div className="shrink-0">
+                <div className="shrink-0 flex items-center gap-2">
                   {item.copied ? (
                     <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2.5 py-1 rounded-full border border-emerald-200">Copied</span>
                   ) : (
-                    <Button variant="ghost" onClick={() => onCopySingle(item)} className="!p-2 text-gray-400 hover:text-indigo-600">
+                    <Button variant="ghost" onClick={() => onCopySingle(item)} className="!p-2 text-gray-400 hover:text-indigo-600" title="Copy to clipboard">
                       <Copy size={16} />
                     </Button>
                   )}
+                  <Button variant="ghost" onClick={() => onDeleteSingle(item._id)} className="!p-2 text-gray-400 hover:text-red-600" title="Delete URL">
+                    <Trash2 size={16} />
+                  </Button>
                 </div>
               </div>
             ))}
