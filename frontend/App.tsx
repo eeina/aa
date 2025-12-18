@@ -3,6 +3,7 @@ import { Header } from './components/Header';
 import { SitemapInput } from './components/SitemapInput';
 import { StatsOverview } from './components/StatsOverview';
 import { ActionPanel } from './components/ActionPanel';
+import { SystemTools } from './components/SystemTools';
 import { UrlListView } from './components/UrlListView';
 import { SitemapListView } from './components/SitemapListView';
 import { RawModal } from './components/RawModal';
@@ -16,6 +17,8 @@ export default function App() {
   const [showBackupModal, setShowBackupModal] = useState(false);
   const m = useSitemapManager();
 
+  const hasData = m.stats.totalUrls > 0 || m.sitemaps.length > 0;
+
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col font-sans">
       <Header />
@@ -27,14 +30,20 @@ export default function App() {
             enableQualityFilter={m.enableQualityFilter} setEnableQualityFilter={m.setEnableQualityFilter}
             loading={m.loading} onExtract={m.handleExtract} 
           />
-          {(m.stats.totalUrls > 0 || m.sitemaps.length > 0) && (
+          
+          <SystemTools 
+             onOpenBackup={() => setShowBackupModal(true)}
+             onClearDatabase={m.handleClearDatabase}
+             hasData={hasData}
+          />
+
+          {hasData && (
             <>
               <ActionPanel 
                 loading={m.loading} stats={m.stats} filterStatus={m.filterStatus} searchTerm={m.searchTerm}
                 onCopyNextBatch={(n) => m.copyNextBatch(n)} onCopyAllPending={() => m.copyAllPending()} 
                 onCopyPagePending={m.copyPagePending} onShowRaw={() => setShowRawModal(true)} 
-                onClearDatabase={m.handleClearDatabase} pageHasPending={m.urls.some(u => !u.copied)}
-                onOpenBackup={() => setShowBackupModal(true)}
+                pageHasPending={m.urls.some(u => !u.copied)}
               />
               <StatsOverview stats={m.stats} />
             </>
