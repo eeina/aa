@@ -27,7 +27,7 @@ if (!fs.existsSync(uploadDir)){
 const upload = multer({ dest: uploadDir });
 
 app.use(cors()); // Enable CORS for all routes
-app.use(express.json({ limit: '50mb' })); // Increased limit for standard JSON just in case
+app.use(express.json({ limit: '100mb' })); // Increased limit for JSON bodies
 
 // --- MongoDB Connection ---
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sitemap_db';
@@ -552,8 +552,8 @@ app.get('/api/backup', async (req, res) => {
 
 // 11. Streaming Restore (Upload JSON)
 app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
-  // Disable timeout for this request (or set to very long like 30m)
-  req.setTimeout(1800000); // 30 minutes
+  // Disable timeout for this request to handle large files (30 minutes)
+  req.setTimeout(1800000); 
 
   const { clearBefore } = req.body;
   const filePath = req.file?.path;
@@ -562,19 +562,23 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
     return res.status(400).json({ error: 'No file uploaded' });
   }
 
+  // Use native MongoDB collection for bulk inserts to avoid Mongoose overhead/OOM on large datasets
   const handleInsert = async (Model, batch) => {
     try {
-        await Model.insertMany(batch, { ordered: false });
-        return batch.length;
+        if (!batch || batch.length === 0) return 0;
+        // insertMany with ordered: false allows continuing even if duplicates exist
+        const result = await Model.collection.insertMany(batch, { ordered: false });
+        return result.insertedCount;
     } catch (err) {
-        // If error is duplicate key (11000), we count the ones that succeeded
+        // 11000 is duplicate key error
         if (err.code === 11000) {
            return err.result?.nInserted || 0;
         }
-        // If unexpected error, throw it so we can log it (but might want to continue?)
-        console.error('Bulk insert error:', err.message);
-        // For robustness, if it's not a duplicate error, we still probably want to continue processing the stream
-        // Return 0 inserted for this batch if completely failed
+        // Check for bulk write errors where some operations might have succeeded
+        if (err.writeErrors) {
+            return err.result?.nInserted || 0;
+        }
+        console.error('Bulk insert critical error:', err.message);
         return 0;
     }
   };
@@ -597,10 +601,12 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
       .pipe(JSONStream.parse('sitemaps.*'));
 
     let sitemapBatch = [];
+    const SITEMAP_BATCH_SIZE = 500;
+
     for await (const doc of sitemapStream) {
-       delete doc._id;
+       delete doc._id; // Let Mongo generate new IDs or use existing if provided and valid, but safer to regenerate if schema mismatch
        sitemapBatch.push(doc);
-       if (sitemapBatch.length >= 100) {
+       if (sitemapBatch.length >= SITEMAP_BATCH_SIZE) {
          stats.sitemaps += await handleInsert(SitemapFile, sitemapBatch);
          sitemapBatch = [];
        }
@@ -617,18 +623,16 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
       .pipe(JSONStream.parse('urls.*'));
     
     let urlBatch = [];
-    const BATCH_SIZE = 5000; // Optimal batch size for MongoDB
+    // Increase batch size for native driver performance
+    const URL_BATCH_SIZE = 10000; 
 
     for await (const doc of urlStream) {
       delete doc._id;
       urlBatch.push(doc);
-      if (urlBatch.length >= BATCH_SIZE) {
+      if (urlBatch.length >= URL_BATCH_SIZE) {
         stats.urls += await handleInsert(SitemapUrl, urlBatch);
         urlBatch = [];
-        
-        // Optional: Force garbage collection hints if available (not in standard JS)
-        // or just log progress
-        if (stats.urls % 50000 === 0) console.log(`Processed ${stats.urls} URLs...`);
+        console.log(`Processed ${stats.urls} URLs so far...`);
       }
     }
     if (urlBatch.length > 0) {
