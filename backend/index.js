@@ -583,6 +583,58 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
     }
   };
 
+  // Generic stream processor helper to handle JSONStream with events (no for-await)
+  const processStream = (pathSelector, Model, batchSize, logLabel) => {
+    return new Promise((resolve, reject) => {
+       const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+       const jsonParser = JSONStream.parse(pathSelector);
+       
+       fileStream.pipe(jsonParser);
+
+       let batch = [];
+       let totalProcessed = 0;
+
+       // Handle data event
+       jsonParser.on('data', async (data) => {
+         if (data._id) delete data._id; // Remove old IDs
+         batch.push(data);
+
+         if (batch.length >= batchSize) {
+           // Backpressure: pause stream while inserting
+           jsonParser.pause();
+           
+           try {
+             const count = await handleInsert(Model, batch);
+             totalProcessed += count;
+             if (logLabel) console.log(`${logLabel}: Processed ${totalProcessed}...`);
+             batch = [];
+             jsonParser.resume();
+           } catch (err) {
+             fileStream.destroy();
+             reject(err);
+           }
+         }
+       });
+
+       // Handle end event
+       jsonParser.on('end', async () => {
+         if (batch.length > 0) {
+            try {
+              const count = await handleInsert(Model, batch);
+              totalProcessed += count;
+            } catch (err) {
+              reject(err);
+              return;
+            }
+         }
+         resolve(totalProcessed);
+       });
+
+       jsonParser.on('error', (err) => reject(err));
+       fileStream.on('error', (err) => reject(err));
+    });
+  };
+
   try {
     if (clearBefore === 'true') {
       console.log('Clearing database...');
@@ -591,63 +643,29 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
       console.log('Database cleared.');
     }
 
-    const stats = { sitemaps: 0, urls: 0 };
-
     console.log('Starting restore process...');
 
     // --- PHASE 1: SITEMAPS ---
-    console.log('Restoring sitemaps...');
-    const sitemapStream = fs.createReadStream(filePath, { encoding: 'utf8' })
-      .pipe(JSONStream.parse('sitemaps.*'));
-
-    let sitemapBatch = [];
-    const SITEMAP_BATCH_SIZE = 500;
-
-    for await (const doc of sitemapStream) {
-       delete doc._id; // Let Mongo generate new IDs or use existing if provided and valid, but safer to regenerate if schema mismatch
-       sitemapBatch.push(doc);
-       if (sitemapBatch.length >= SITEMAP_BATCH_SIZE) {
-         stats.sitemaps += await handleInsert(SitemapFile, sitemapBatch);
-         sitemapBatch = [];
-       }
-    }
-    if (sitemapBatch.length > 0) {
-      stats.sitemaps += await handleInsert(SitemapFile, sitemapBatch);
-    }
-    console.log(`Restored ${stats.sitemaps} sitemaps.`);
+    console.log('Restoring Sitemaps...');
+    const sitemapsCount = await processStream('sitemaps.*', SitemapFile, 500);
+    console.log(`Restored ${sitemapsCount} sitemaps.`);
 
     // --- PHASE 2: URLS ---
     console.log('Restoring URLs...');
-    // Create a NEW stream for the second pass
-    const urlStream = fs.createReadStream(filePath, { encoding: 'utf8' })
-      .pipe(JSONStream.parse('urls.*'));
-    
-    let urlBatch = [];
-    // Increase batch size for native driver performance
-    const URL_BATCH_SIZE = 10000; 
-
-    for await (const doc of urlStream) {
-      delete doc._id;
-      urlBatch.push(doc);
-      if (urlBatch.length >= URL_BATCH_SIZE) {
-        stats.urls += await handleInsert(SitemapUrl, urlBatch);
-        urlBatch = [];
-        console.log(`Processed ${stats.urls} URLs so far...`);
-      }
-    }
-    if (urlBatch.length > 0) {
-      stats.urls += await handleInsert(SitemapUrl, urlBatch);
-    }
+    const urlsCount = await processStream('urls.*', SitemapUrl, 5000, 'URLs');
+    console.log(`Restored ${urlsCount} URLs.`);
 
     // Clean up temp file
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
-    console.log(`Restore complete. Sitemaps: ${stats.sitemaps}, URLs: ${stats.urls}`);
-    res.json({ success: true, message: `Restore complete. Imported ${stats.sitemaps} sitemaps and ${stats.urls} URLs.` });
+    res.json({ success: true, message: `Restore complete. Imported ${sitemapsCount} sitemaps and ${urlsCount} URLs.` });
 
   } catch (error) {
     console.error('Restore critical error:', error);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    // Safer file cleanup
+    if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch(e) {}
+    }
     res.status(500).json({ error: 'Restore failed: ' + error.message });
   }
 });
