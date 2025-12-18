@@ -512,6 +512,9 @@ app.get('/api/sitemaps/:id/urls', async (req, res) => {
 // 10. Streaming Backup (Download JSON)
 app.get('/api/backup', async (req, res) => {
   try {
+    // Increase timeout for large backups
+    req.setTimeout(600000); // 10 minutes
+
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', 'attachment; filename="sitemap_manager_backup.json"');
 
@@ -542,7 +545,6 @@ app.get('/api/backup', async (req, res) => {
 
   } catch (error) {
     console.error('Backup error:', error);
-    // If headers haven't been sent, send error, otherwise we just close stream
     if (!res.headersSent) res.status(500).json({ error: 'Backup failed' });
     else res.end();
   }
@@ -550,6 +552,9 @@ app.get('/api/backup', async (req, res) => {
 
 // 11. Streaming Restore (Upload JSON)
 app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
+  // Disable timeout for this request (or set to very long like 30m)
+  req.setTimeout(1800000); // 30 minutes
+
   const { clearBefore } = req.body;
   const filePath = req.file?.path;
 
@@ -557,66 +562,87 @@ app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
     return res.status(400).json({ error: 'No file uploaded' });
   }
 
+  const handleInsert = async (Model, batch) => {
+    try {
+        await Model.insertMany(batch, { ordered: false });
+        return batch.length;
+    } catch (err) {
+        // If error is duplicate key (11000), we count the ones that succeeded
+        if (err.code === 11000) {
+           return err.result?.nInserted || 0;
+        }
+        // If unexpected error, throw it so we can log it (but might want to continue?)
+        console.error('Bulk insert error:', err.message);
+        // For robustness, if it's not a duplicate error, we still probably want to continue processing the stream
+        // Return 0 inserted for this batch if completely failed
+        return 0;
+    }
+  };
+
   try {
     if (clearBefore === 'true') {
+      console.log('Clearing database...');
       await SitemapUrl.deleteMany({});
       await SitemapFile.deleteMany({});
-      console.log('Database cleared before restore.');
+      console.log('Database cleared.');
     }
 
     const stats = { sitemaps: 0, urls: 0 };
-    
-    // Process Sitemaps first
+
+    console.log('Starting restore process...');
+
+    // --- PHASE 1: SITEMAPS ---
+    console.log('Restoring sitemaps...');
     const sitemapStream = fs.createReadStream(filePath, { encoding: 'utf8' })
       .pipe(JSONStream.parse('sitemaps.*'));
 
-    const sitemapBatchSize = 100;
     let sitemapBatch = [];
-
     for await (const doc of sitemapStream) {
-       // Remove _id to avoid collision if strict, or use upsert. 
-       // Simple insertMany with ordered:false will skip duplicates on unique index (url)
        delete doc._id;
        sitemapBatch.push(doc);
-       if (sitemapBatch.length >= sitemapBatchSize) {
-         await SitemapFile.insertMany(sitemapBatch, { ordered: false }).catch(() => {});
-         stats.sitemaps += sitemapBatch.length;
+       if (sitemapBatch.length >= 100) {
+         stats.sitemaps += await handleInsert(SitemapFile, sitemapBatch);
          sitemapBatch = [];
        }
     }
     if (sitemapBatch.length > 0) {
-      await SitemapFile.insertMany(sitemapBatch, { ordered: false }).catch(() => {});
-      stats.sitemaps += sitemapBatch.length;
+      stats.sitemaps += await handleInsert(SitemapFile, sitemapBatch);
     }
+    console.log(`Restored ${stats.sitemaps} sitemaps.`);
 
-    // Process URLs second
+    // --- PHASE 2: URLS ---
+    console.log('Restoring URLs...');
+    // Create a NEW stream for the second pass
     const urlStream = fs.createReadStream(filePath, { encoding: 'utf8' })
       .pipe(JSONStream.parse('urls.*'));
     
-    const urlBatchSize = 2000; // Larger batch for URLs
     let urlBatch = [];
+    const BATCH_SIZE = 5000; // Optimal batch size for MongoDB
 
     for await (const doc of urlStream) {
       delete doc._id;
       urlBatch.push(doc);
-      if (urlBatch.length >= urlBatchSize) {
-        await SitemapUrl.insertMany(urlBatch, { ordered: false }).catch(() => {});
-        stats.urls += urlBatch.length;
+      if (urlBatch.length >= BATCH_SIZE) {
+        stats.urls += await handleInsert(SitemapUrl, urlBatch);
         urlBatch = [];
+        
+        // Optional: Force garbage collection hints if available (not in standard JS)
+        // or just log progress
+        if (stats.urls % 50000 === 0) console.log(`Processed ${stats.urls} URLs...`);
       }
     }
     if (urlBatch.length > 0) {
-      await SitemapUrl.insertMany(urlBatch, { ordered: false }).catch(() => {});
-      stats.urls += urlBatch.length;
+      stats.urls += await handleInsert(SitemapUrl, urlBatch);
     }
 
     // Clean up temp file
-    fs.unlinkSync(filePath);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
+    console.log(`Restore complete. Sitemaps: ${stats.sitemaps}, URLs: ${stats.urls}`);
     res.json({ success: true, message: `Restore complete. Imported ${stats.sitemaps} sitemaps and ${stats.urls} URLs.` });
 
   } catch (error) {
-    console.error('Restore error:', error);
+    console.error('Restore critical error:', error);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     res.status(500).json({ error: 'Restore failed: ' + error.message });
   }
