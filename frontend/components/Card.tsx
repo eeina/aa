@@ -2,7 +2,8 @@ import React from 'react';
 import { LucideIcon } from 'lucide-react';
 
 interface CardProps {
-  children: React.ReactNode;
+  /* Make children optional to avoid instantiation errors in some TS environments */
+  children?: React.ReactNode;
   title?: string;
   icon?: LucideIcon;
   actions?: React.ReactNode;

@@ -32,6 +32,7 @@ export default function App() {
                 onCopyNextBatch={(n) => m.copyNextBatch(n)} onCopyAllPending={() => m.copyAllPending()} 
                 onCopyPagePending={m.copyPagePending} onShowRaw={() => setShowRawModal(true)} 
                 onClearDatabase={m.handleClearDatabase} pageHasPending={m.urls.some(u => !u.copied)}
+                onBackup={m.backupDatabase} onRestore={m.restoreDatabase}
               />
               <StatsOverview stats={m.stats} />
             </>
