@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { Copy, ClipboardList, Trash2, FileText, Download, Upload } from 'lucide-react';
+import React from 'react';
+import { Copy, ClipboardList, Trash2, FileText, Database } from 'lucide-react';
 import { Card } from './Card';
 import { Button } from './Button';
 
@@ -13,8 +13,7 @@ interface ActionPanelProps {
   onCopyPagePending: () => void;
   onShowRaw: () => void;
   onClearDatabase: () => void;
-  onBackup: () => void;
-  onRestore: (file: File) => void;
+  onOpenBackup: () => void;
   pageHasPending: boolean;
 }
 
@@ -28,72 +27,77 @@ export const ActionPanel = ({
   onCopyPagePending,
   onShowRaw,
   onClearDatabase,
-  onBackup,
-  onRestore,
+  onOpenBackup,
   pageHasPending
 }: ActionPanelProps) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const progressPercent = stats.totalUrls > 0 ? Math.round((stats.copied / stats.totalUrls) * 100) : 0;
-
-  const handleRestoreClick = () => fileInputRef.current?.click();
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (window.confirm("Restoring will OVERWRITE current data. Continue?")) {
-        onRestore(file);
-      }
-      e.target.value = ''; // Reset input
-    }
-  };
 
   return (
     <>
       <Card title="Quick Actions" icon={Copy}>
         <div className="flex flex-col gap-3">
           <Button 
-            variant="primary" onClick={() => onCopyNextBatch(10)} 
-            disabled={loading || (filterStatus === 'copied')} fullWidth icon={ClipboardList}
+            variant="primary" 
+            onClick={() => onCopyNextBatch(10)} 
+            disabled={loading || (filterStatus === 'copied')} 
+            fullWidth 
+            icon={ClipboardList}
           >
             Copy Next 10 Pending {searchTerm ? '(Filtered)' : ''}
           </Button>
+
           <Button 
-            variant="success" onClick={onCopyAllPending} 
-            disabled={loading || (filterStatus === 'copied')} fullWidth icon={Copy}
+            variant="success" 
+            onClick={onCopyAllPending} 
+            disabled={loading || (filterStatus === 'copied')} 
+            fullWidth 
+            icon={Copy}
           >
             {loading ? 'Processing...' : `Copy All Pending ${searchTerm ? '(Filtered)' : ''}`}
           </Button>
-          <Button variant="secondary" onClick={onCopyPagePending} disabled={!pageHasPending} fullWidth icon={Copy}>
+          
+          <Button 
+            variant="secondary" 
+            onClick={onCopyPagePending} 
+            disabled={!pageHasPending} 
+            fullWidth 
+            icon={Copy}
+          >
             Copy This Page
           </Button>
-          <Button variant="outline" onClick={onShowRaw} fullWidth icon={FileText}>
+
+          <Button 
+            variant="outline" 
+            onClick={onShowRaw} 
+            fullWidth 
+            icon={FileText}
+          >
             View Page Raw List
           </Button>
+
           <div className="mt-2">
             <div className="flex justify-between text-xs text-gray-500 mb-1.5 font-medium">
               <span>Progress (Total DB)</span>
               <span>{progressPercent}%</span>
             </div>
             <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-              <div className="h-full bg-emerald-500 transition-all duration-500 ease-out" style={{ width: `${progressPercent}%` }}></div>
+              <div 
+                className="h-full bg-emerald-500 transition-all duration-500 ease-out" 
+                style={{ width: `${progressPercent}%` }}
+              ></div>
             </div>
           </div>
         </div>
       </Card>
 
-      <Card title="Management" icon={Trash2}>
+      <Card title="Management" icon={Database}>
          <div className="flex flex-col gap-3">
-            <div className="grid grid-cols-2 gap-2">
-              <Button variant="outline" onClick={onBackup} disabled={loading} icon={Download} className="!px-2">
-                Backup
-              </Button>
-              <Button variant="outline" onClick={handleRestoreClick} disabled={loading} icon={Upload} className="!px-2">
-                Restore
-              </Button>
-            </div>
-            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".json" />
-            <Button variant="danger" onClick={onClearDatabase} fullWidth icon={Trash2}>
-               Clear Full Database
-            </Button>
+           <Button variant="outline" onClick={onOpenBackup} fullWidth icon={Database}>
+              Backup & Restore
+           </Button>
+           <Button variant="danger" onClick={onClearDatabase} fullWidth icon={Trash2}>
+              Clear Full Database
+           </Button>
          </div>
       </Card>
     </>

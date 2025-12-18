@@ -1,4 +1,4 @@
-import 'dotenv/config'; 
+import 'dotenv/config'; // Load environment variables from .env file
 import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -6,20 +6,41 @@ import { parseStringPromise } from 'xml2js';
 import * as cheerio from 'cheerio';
 import zlib from 'zlib';
 import cors from 'cors';
+import multer from 'multer';
+import fs from 'fs';
+import JSONStream from 'JSONStream';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
 const port = 5000;
 
-app.use(cors());
-app.use(express.json({ limit: '500mb' })); // Increased limit for large restores
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)){
+    fs.mkdirSync(uploadDir);
+}
+
+const upload = multer({ dest: uploadDir });
+
+app.use(cors()); // Enable CORS for all routes
+app.use(express.json({ limit: '50mb' })); // Increased limit for standard JSON just in case
 
 // --- MongoDB Connection ---
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sitemap_db';
+
+const maskedUri = MONGODB_URI.replace(/:([^:@]+)@/, ':****@');
+console.log(`Attempting to connect to MongoDB at: ${maskedUri}`);
+
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('Could not connect to MongoDB:', err));
 
 // --- Mongoose Schemas and Models ---
+
 const sitemapUrlSchema = new mongoose.Schema({
   url: { type: String, required: true, unique: true },
   sourceDomain: { type: String, required: true },
@@ -27,6 +48,7 @@ const sitemapUrlSchema = new mongoose.Schema({
   extractedAt: { type: Date, default: Date.now },
   copied: { type: Boolean, default: false }
 });
+
 const SitemapUrl = mongoose.model('SitemapUrl', sitemapUrlSchema);
 
 const sitemapFileSchema = new mongoose.Schema({
@@ -35,213 +57,572 @@ const sitemapFileSchema = new mongoose.Schema({
   foundAt: { type: Date, default: Date.now },
   type: { type: String, default: 'xml' }
 });
+
 const SitemapFile = mongoose.model('SitemapFile', sitemapFileSchema);
 
 // --- Helper Functions ---
+
 async function fetchContent(url) {
   try {
     const response = await axios.get(url, {
       responseType: 'arraybuffer',
-      headers: { 'User-Agent': 'SitemapExtractorBot/1.0' },
-      timeout: 10000 
+      headers: {
+        'User-Agent': 'SitemapExtractorBot/1.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 10000
     });
+    const contentType = response.headers['content-type'];
+    const contentEncoding = response.headers['content-encoding'];
+
     let data = response.data;
-    if (response.headers['content-encoding'] === 'gzip') {
+
+    if (contentEncoding === 'gzip' || contentType?.includes('application/x-gzip')) {
       data = await new Promise((resolve, reject) => {
-        zlib.gunzip(data, (err, dezipped) => err ? reject(err) : resolve(dezipped));
+        zlib.gunzip(data, (err, dezipped) => {
+          if (err) reject(err);
+          resolve(dezipped);
+        });
       });
     }
     return data.toString('utf8');
-  } catch (error) { throw new Error(`Fetch failed: ${url}`); }
+  } catch (error) {
+    throw new Error(`Failed to fetch content from ${url}`);
+  }
 }
 
 async function checkUrlQuality(url) {
   try {
     const html = await fetchContent(url);
     const $ = cheerio.load(html);
-    const rating = parseFloat($('.mm-recipes-review-bar__rating').first().text().trim());
-    const reviews = parseInt($('.mm-recipes-review-bar__comment-count').first().text().replace(/[^0-9]/g, ''), 10);
-    return !isNaN(rating) && !isNaN(reviews) && rating >= 4.0 && reviews >= 50;
-  } catch (error) { return false; }
+    
+    const ratingText = $('.mm-recipes-review-bar__rating').first().text().trim();
+    const reviewText = $('.mm-recipes-review-bar__comment-count').first().text().trim();
+
+    const rating = parseFloat(ratingText);
+    const reviews = parseInt(reviewText.replace(/[^0-9]/g, ''), 10);
+
+    if (!isNaN(rating) && !isNaN(reviews) && rating >= 4.0 && reviews >= 50) {
+      return true;
+    }
+    return false;
+  } catch (error) {
+    return false;
+  }
 }
 
 async function extractUrlsAndSitemaps(sitemapUrl, extractedUrlMap, extractedSitemapsSet) {
   try {
     const xmlContent = await fetchContent(sitemapUrl);
     const result = await parseStringPromise(xmlContent);
-    if (result.sitemapindex?.sitemap) {
-      for (const entry of result.sitemapindex.sitemap) {
-        const nested = entry.loc?.[0];
-        if (nested && !extractedSitemapsSet.has(nested)) {
-          extractedSitemapsSet.add(nested);
-          await extractUrlsAndSitemaps(nested, extractedUrlMap, extractedSitemapsSet);
+
+    if (result.sitemapindex && result.sitemapindex.sitemap) {
+      for (const sitemapEntry of result.sitemapindex.sitemap) {
+        const nestedSitemapUrl = sitemapEntry.loc?.[0];
+        if (nestedSitemapUrl) {
+          if (!extractedSitemapsSet.has(nestedSitemapUrl)) {
+             extractedSitemapsSet.add(nestedSitemapUrl);
+             await extractUrlsAndSitemaps(nestedSitemapUrl, extractedUrlMap, extractedSitemapsSet);
+          }
         }
       }
-    } else if (result.urlset?.url) {
-      for (const entry of result.urlset.url) {
-        const loc = entry.loc?.[0];
-        if (loc && !extractedUrlMap.has(loc)) extractedUrlMap.set(loc, sitemapUrl);
+    } else if (result.urlset && result.urlset.url) {
+      for (const urlEntry of result.urlset.url) {
+        const loc = urlEntry.loc?.[0];
+        if (loc && !extractedUrlMap.has(loc)) {
+          extractedUrlMap.set(loc, sitemapUrl);
+        }
       }
     }
-  } catch (e) {}
+  } catch (error) {
+    console.error(`Error processing sitemap ${sitemapUrl}:`, error.message);
+  }
 }
 
 // --- API Endpoints ---
+
+// 1. Extract URLs
 app.post('/api/extract-sitemap', async (req, res) => {
   const { sitemapUrl, filterPattern, enableQualityFilter } = req.body;
+
+  if (!sitemapUrl) {
+    return res.status(400).json({ error: 'Sitemap URL is required' });
+  }
+
+  let websiteDomain;
   try {
-    const websiteDomain = new URL(sitemapUrl).origin;
-    const allFoundUrlMap = new Map();
-    const allFoundSitemaps = new Set([sitemapUrl]);
+    websiteDomain = new URL(sitemapUrl).origin;
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid URL provided' });
+  }
+
+  const allFoundUrlMap = new Map(); 
+  const allFoundSitemaps = new Set(); 
+  
+  allFoundSitemaps.add(sitemapUrl);
+
+  try {
     await extractUrlsAndSitemaps(sitemapUrl, allFoundUrlMap, allFoundSitemaps);
 
+    if (allFoundUrlMap.size === 0 && allFoundSitemaps.size === 0) {
+      return res.status(404).json({ error: 'No content found in the provided sitemap.' });
+    }
+
+    const newUrlsToStore = [];
+    let patternSkippedCount = 0;
+    let qualitySkippedCount = 0;
+
     const candidates = Array.from(allFoundUrlMap.keys());
-    const toStore = [];
-    for (let i = 0; i < candidates.length; i += 20) {
-      const batch = candidates.slice(i, i + 20);
-      const results = await Promise.all(batch.map(async (url) => {
-        if (filterPattern && !url.includes(filterPattern)) return null;
-        if (enableQualityFilter && !(await checkUrlQuality(url))) return null;
-        return { url, sourceDomain: websiteDomain, parentSitemap: allFoundUrlMap.get(url), copied: false };
-      }));
-      toStore.push(...results.filter(Boolean));
-    }
+    const BATCH_SIZE = 10; 
+    
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      const batchPromises = batch.map(async (uniqueUrl) => {
+        if (filterPattern && filterPattern.trim() !== '' && !uniqueUrl.includes(filterPattern)) {
+          return { status: 'pattern_skipped', url: uniqueUrl };
+        }
+        if (enableQualityFilter) {
+          const meetsQuality = await checkUrlQuality(uniqueUrl);
+          if (!meetsQuality) {
+            return { status: 'quality_skipped', url: uniqueUrl };
+          }
+        }
+        return { status: 'keep', url: uniqueUrl };
+      });
 
-    if (toStore.length) await SitemapUrl.insertMany(toStore, { ordered: false }).catch(() => {});
-    const sitemaps = Array.from(allFoundSitemaps).map(url => ({ url, sourceDomain: websiteDomain }));
-    if (sitemaps.length) await SitemapFile.insertMany(sitemaps, { ordered: false }).catch(() => {});
+      const results = await Promise.all(batchPromises);
 
-    res.json({ message: 'Success', totalUrlsFound: allFoundUrlMap.size, newUrlsStored: toStore.length });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/urls', async (req, res) => {
-  const { page = 1, limit = 50, status, search, parentSitemap } = req.query;
-  const query = {};
-  if (parentSitemap) query.parentSitemap = parentSitemap;
-  if (status === 'pending') query.copied = false;
-  else if (status === 'copied') query.copied = true;
-  if (search) query.url = { $regex: search, $options: 'i' };
-
-  const [total, data, totalDb, pendingDb] = await Promise.all([
-    SitemapUrl.countDocuments(query),
-    SitemapUrl.find(query).sort({ url: 1 }).skip((page - 1) * limit).limit(limit),
-    SitemapUrl.countDocuments({}),
-    SitemapUrl.countDocuments({ copied: false })
-  ]);
-
-  res.json({ data, pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }, stats: { totalUrls: totalDb, pending: pendingDb, copied: totalDb - pendingDb } });
-});
-
-app.get('/api/urls/pending', async (req, res) => {
-  const { limit, search, parentSitemap } = req.query;
-  const query = { copied: false };
-  if (parentSitemap) query.parentSitemap = parentSitemap;
-  if (search) query.url = { $regex: search, $options: 'i' };
-  const docs = await SitemapUrl.find(query).select('url').sort({ url: 1 }).limit(parseInt(limit) || 0);
-  res.json({ text: docs.map(d => d.url).join('\n'), count: docs.length, urls: docs.map(d => d.url) });
-});
-
-app.post('/api/mark-copied', async (req, res) => {
-  const { urls, allPending, search, parentSitemap } = req.body;
-  const query = { copied: false };
-  if (allPending) {
-    if (parentSitemap) query.parentSitemap = parentSitemap;
-    if (search) query.url = { $regex: search, $options: 'i' };
-    await SitemapUrl.updateMany(query, { $set: { copied: true } });
-  } else {
-    await SitemapUrl.updateMany({ url: { $in: urls } }, { $set: { copied: true } });
-  }
-  res.json({ success: true });
-});
-
-app.post('/api/sitemaps/process-quality', async (req, res) => {
-  const { parentSitemap, limit } = req.body;
-  const candidates = await SitemapUrl.find({ parentSitemap, copied: false }).limit(parseInt(limit));
-  if (!candidates.length) return res.json({ count: 0 });
-
-  const results = await Promise.all(candidates.map(async doc => ({ url: doc.url, isQuality: await checkUrlQuality(doc.url) })));
-  const passing = results.filter(r => r.isQuality).map(r => r.url);
-  await SitemapUrl.updateMany({ url: { $in: candidates.map(c => c.url) } }, { $set: { copied: true } });
-  res.json({ text: passing.join('\n'), count: passing.length, processedCount: candidates.length });
-});
-
-app.delete('/api/urls/:id', async (req, res) => {
-  await SitemapUrl.findByIdAndDelete(req.params.id);
-  res.json({ success: true });
-});
-
-app.post('/api/clear-database', async (req, res) => {
-  await SitemapUrl.deleteMany({});
-  await SitemapFile.deleteMany({});
-  res.json({ success: true });
-});
-
-app.get('/api/sitemaps', async (req, res) => {
-  const sitemaps = await SitemapFile.find().sort({ foundAt: -1 }).lean();
-  const data = await Promise.all(sitemaps.map(async (sm) => {
-    const total = await SitemapUrl.countDocuments({ parentSitemap: sm.url });
-    const pending = await SitemapUrl.countDocuments({ parentSitemap: sm.url, copied: false });
-    return { ...sm, stats: { total, pending, copied: total - pending } };
-  }));
-  res.json({ data });
-});
-
-app.get('/api/sitemaps/:id/urls', async (req, res) => {
-  const sm = await SitemapFile.findById(req.params.id);
-  const urls = await SitemapUrl.find({ parentSitemap: sm.url });
-  res.json({ text: urls.map(u => u.url).join('\n'), count: urls.length });
-});
-
-// --- Backup & Restore (Handles 1M+ Records via Streaming) ---
-
-app.get('/api/backup', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', 'attachment; filename=sitemap_backup.json');
-  
-  res.write('{"sitemaps":');
-  const sitemaps = await SitemapFile.find().lean();
-  res.write(JSON.stringify(sitemaps));
-  
-  res.write(',"urls":[');
-  const cursor = SitemapUrl.find().lean().cursor();
-  let first = true;
-  for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
-    if (!first) res.write(',');
-    res.write(JSON.stringify(doc));
-    first = false;
-  }
-  res.write(']}');
-  res.end();
-});
-
-app.post('/api/restore', async (req, res) => {
-  const { sitemaps, urls, clearFirst } = req.body;
-  try {
-    if (clearFirst) {
-      await SitemapUrl.deleteMany({});
-      await SitemapFile.deleteMany({});
-    }
-
-    if (sitemaps?.length) {
-      await SitemapFile.insertMany(sitemaps, { ordered: false }).catch(() => {});
-    }
-
-    if (urls?.length) {
-      // Process 1M URLs in chunks of 5000 to avoid Mongo payload limits
-      const CHUNK = 5000;
-      for (let i = 0; i < urls.length; i += CHUNK) {
-        const batch = urls.slice(i, i + CHUNK).map(u => {
-           const { _id, ...rest } = u; // Exclude original _id to avoid collisions if necessary
-           return rest;
-        });
-        await SitemapUrl.insertMany(batch, { ordered: false }).catch(() => {});
+      for (const res of results) {
+        if (res.status === 'keep') {
+          newUrlsToStore.push({
+            url: res.url,
+            sourceDomain: websiteDomain,
+            parentSitemap: allFoundUrlMap.get(res.url),
+            copied: false
+          });
+        } else if (res.status === 'pattern_skipped') {
+          patternSkippedCount++;
+        } else if (res.status === 'quality_skipped') {
+          qualitySkippedCount++;
+        }
       }
     }
-    res.json({ success: true, count: urls?.length || 0 });
+
+    let newUrlsStoredCount = 0;
+    if (newUrlsToStore.length > 0) {
+      try {
+        const insertResult = await SitemapUrl.insertMany(newUrlsToStore, { ordered: false });
+        newUrlsStoredCount = insertResult.length;
+      } catch (bulkError) {
+        if (bulkError.code === 11000) {
+          newUrlsStoredCount = bulkError.result.nInserted;
+        } else {
+          throw bulkError;
+        }
+      }
+    }
+
+    const newSitemapsToStore = Array.from(allFoundSitemaps).map(url => ({
+      url,
+      sourceDomain: websiteDomain
+    }));
+
+    let newSitemapsStoredCount = 0;
+    if (newSitemapsToStore.length > 0) {
+      try {
+        const insertResult = await SitemapFile.insertMany(newSitemapsToStore, { ordered: false });
+        newSitemapsStoredCount = insertResult.length;
+      } catch (bulkError) {
+        if (bulkError.code === 11000) {
+          newSitemapsStoredCount = bulkError.result.nInserted;
+        } 
+      }
+    }
+
+    res.status(200).json({
+      message: `Processed. Found ${allFoundUrlMap.size} URLs, ${allFoundSitemaps.size} Sitemaps. Stored ${newUrlsStoredCount} URLs.`,
+      newUrlsStored: newUrlsStoredCount,
+      newSitemapsStored: newSitemapsStoredCount,
+      totalUrlsFound: allFoundUrlMap.size,
+      skipped: patternSkippedCount + qualitySkippedCount,
+      details: {
+        patternSkipped: patternSkippedCount,
+        qualitySkipped: qualitySkippedCount
+      },
+      domain: websiteDomain
+    });
+
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Sitemap extraction API error:', error);
+    res.status(500).json({ error: 'Failed to process sitemap.', details: error.message });
   }
 });
 
-app.listen(port, () => console.log(`Backend: http://localhost:${port}`));
+// 2. Get URLs
+app.get('/api/urls', async (req, res) => {
+  const { domain, page = 1, limit = 50, status, search, parentSitemap } = req.query;
+  
+  const query = {};
+  if (domain) query.sourceDomain = domain;
+  if (parentSitemap) query.parentSitemap = parentSitemap;
+
+  if (status === 'pending') {
+    query.copied = false;
+  } else if (status === 'copied') {
+    query.copied = true;
+  }
+
+  if (search) {
+    query.url = { $regex: search, $options: 'i' };
+  }
+
+  const pageNum = parseInt(page);
+  const limitNum = parseInt(limit);
+
+  try {
+    const total = await SitemapUrl.countDocuments(query);
+    const totalDb = await SitemapUrl.countDocuments({});
+    const pendingDb = await SitemapUrl.countDocuments({ copied: false });
+    
+    const urls = await SitemapUrl.find(query)
+      .sort({ url: 1 }) 
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum);
+
+    res.json({
+      data: urls,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(total / limitNum)
+      },
+      stats: {
+        totalUrls: totalDb,
+        pending: pendingDb,
+        copied: totalDb - pendingDb
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch URLs' });
+  }
+});
+
+// 2.5 Get Pending URLs
+app.get('/api/urls/pending', async (req, res) => {
+  const { domain, limit, search, parentSitemap } = req.query;
+  const query = { copied: false };
+  
+  if (domain) query.sourceDomain = domain;
+  if (parentSitemap) query.parentSitemap = parentSitemap;
+
+  if (search) {
+    query.url = { $regex: search, $options: 'i' };
+  }
+
+  try {
+    let queryBuilder = SitemapUrl.find(query).select('url').sort({ url: 1 });
+    
+    if (limit) {
+      const limitNum = parseInt(limit);
+      if (!isNaN(limitNum) && limitNum > 0) {
+        queryBuilder = queryBuilder.limit(limitNum);
+      }
+    }
+
+    const urls = await queryBuilder;
+    const text = urls.map(u => u.url).join('\n');
+    res.json({ text, count: urls.length, urls: urls.map(u => u.url) });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pending URLs' });
+  }
+});
+
+// 3. Mark URLs as copied
+app.post('/api/mark-copied', async (req, res) => {
+  const { urls, allPending, domain, search, parentSitemap } = req.body; 
+
+  try {
+    if (allPending) {
+       const query = { copied: false };
+       if (domain) query.sourceDomain = domain;
+       if (parentSitemap) query.parentSitemap = parentSitemap;
+       if (search) query.url = { $regex: search, $options: 'i' };
+       
+       await SitemapUrl.updateMany(query, { $set: { copied: true } });
+    } else if (urls && Array.isArray(urls)) {
+       await SitemapUrl.updateMany(
+        { url: { $in: urls } },
+        { $set: { copied: true } }
+      );
+    } else {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update URL status' });
+  }
+});
+
+// 3.5 Process Quality Check Batch
+app.post('/api/sitemaps/process-quality', async (req, res) => {
+  const { parentSitemap, limit } = req.body;
+
+  if (!parentSitemap || !limit) {
+    return res.status(400).json({ error: 'Sitemap URL and limit are required' });
+  }
+
+  try {
+    const candidates = await SitemapUrl.find({ 
+      parentSitemap: parentSitemap, 
+      copied: false 
+    }).limit(parseInt(limit));
+
+    if (candidates.length === 0) {
+      return res.json({ text: '', count: 0, processedCount: 0 });
+    }
+
+    const results = await Promise.all(candidates.map(async (doc) => {
+      const isQuality = await checkUrlQuality(doc.url);
+      return { url: doc.url, isQuality };
+    }));
+
+    const passingUrls = results.filter(r => r.isQuality).map(r => r.url);
+    
+    const allProcessedUrls = candidates.map(c => c.url);
+    await SitemapUrl.updateMany(
+      { url: { $in: allProcessedUrls } },
+      { $set: { copied: true } }
+    );
+
+    const text = passingUrls.join('\n');
+    res.json({ 
+      text, 
+      count: passingUrls.length, 
+      processedCount: allProcessedUrls.length,
+      urls: passingUrls
+    });
+
+  } catch (error) {
+    console.error('Quality process error:', error);
+    res.status(500).json({ error: 'Failed to process quality check' });
+  }
+});
+
+// 4. Delete Single URL
+app.delete('/api/urls/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await SitemapUrl.findByIdAndDelete(id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete error:', error);
+    res.status(500).json({ error: 'Failed to delete URL' });
+  }
+});
+
+// 5. Clear Database
+app.post('/api/clear-database', async (req, res) => {
+  try {
+    await SitemapUrl.deleteMany({});
+    await SitemapFile.deleteMany({});
+    res.json({ success: true, message: 'Database cleared successfully' });
+  } catch (error) {
+    console.error('Clear database error:', error);
+    res.status(500).json({ error: 'Failed to clear database' });
+  }
+});
+
+// 6. Get Last Active Domain
+app.get('/api/last-active-domain', async (req, res) => {
+  try {
+    const lastEntry = await SitemapUrl.findOne().sort({ extractedAt: -1 });
+    if (lastEntry) {
+      res.json({ domain: lastEntry.sourceDomain });
+    } else {
+      res.json({ domain: null });
+    }
+  } catch (error) {
+    console.error('Error fetching last domain:', error);
+    res.status(500).json({ error: 'Failed to fetch last domain' });
+  }
+});
+
+// 7. Get Sitemaps
+app.get('/api/sitemaps', async (req, res) => {
+  try {
+    const sitemaps = await SitemapFile.find().sort({ foundAt: -1 }).lean();
+    
+    const data = await Promise.all(sitemaps.map(async (sm) => {
+      const total = await SitemapUrl.countDocuments({ parentSitemap: sm.url });
+      const pending = await SitemapUrl.countDocuments({ parentSitemap: sm.url, copied: false });
+      return { 
+        ...sm, 
+        _id: sm._id.toString(), 
+        stats: { total, pending, copied: total - pending } 
+      };
+    }));
+
+    res.json({ data });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch sitemaps' });
+  }
+});
+
+// 8. Delete Sitemap
+app.delete('/api/sitemaps/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await SitemapFile.findByIdAndDelete(id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete sitemap' });
+  }
+});
+
+// 9. Get URLs belonging to a specific Sitemap
+app.get('/api/sitemaps/:id/urls', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const sitemap = await SitemapFile.findById(id);
+    
+    if (!sitemap) {
+      return res.status(404).json({ error: 'Sitemap not found' });
+    }
+
+    const urls = await SitemapUrl.find({ parentSitemap: sitemap.url });
+    const text = urls.map(u => u.url).join('\n');
+    
+    res.json({ 
+      text, 
+      count: urls.length, 
+      urls: urls.map(u => u.url),
+      sitemapUrl: sitemap.url
+    });
+  } catch (error) {
+    console.error('Error fetching sitemap urls:', error);
+    res.status(500).json({ error: 'Failed to fetch URLs' });
+  }
+});
+
+// --- BACKUP & RESTORE SYSTEM (Streaming) ---
+
+// 10. Streaming Backup (Download JSON)
+app.get('/api/backup', async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="sitemap_manager_backup.json"');
+
+    // Start JSON Object
+    res.write('{"sitemaps":[');
+
+    // Stream Sitemaps
+    let isFirst = true;
+    for await (const doc of SitemapFile.find().lean().cursor()) {
+      if (!isFirst) res.write(',');
+      isFirst = false;
+      res.write(JSON.stringify(doc));
+    }
+
+    res.write('],"urls":[');
+
+    // Stream URLs
+    isFirst = true;
+    for await (const doc of SitemapUrl.find().lean().cursor()) {
+      if (!isFirst) res.write(',');
+      isFirst = false;
+      res.write(JSON.stringify(doc));
+    }
+
+    // End JSON Object
+    res.write(']}');
+    res.end();
+
+  } catch (error) {
+    console.error('Backup error:', error);
+    // If headers haven't been sent, send error, otherwise we just close stream
+    if (!res.headersSent) res.status(500).json({ error: 'Backup failed' });
+    else res.end();
+  }
+});
+
+// 11. Streaming Restore (Upload JSON)
+app.post('/api/restore', upload.single('backupFile'), async (req, res) => {
+  const { clearBefore } = req.body;
+  const filePath = req.file?.path;
+
+  if (!filePath) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  try {
+    if (clearBefore === 'true') {
+      await SitemapUrl.deleteMany({});
+      await SitemapFile.deleteMany({});
+      console.log('Database cleared before restore.');
+    }
+
+    const stats = { sitemaps: 0, urls: 0 };
+    
+    // Process Sitemaps first
+    const sitemapStream = fs.createReadStream(filePath, { encoding: 'utf8' })
+      .pipe(JSONStream.parse('sitemaps.*'));
+
+    const sitemapBatchSize = 100;
+    let sitemapBatch = [];
+
+    for await (const doc of sitemapStream) {
+       // Remove _id to avoid collision if strict, or use upsert. 
+       // Simple insertMany with ordered:false will skip duplicates on unique index (url)
+       delete doc._id;
+       sitemapBatch.push(doc);
+       if (sitemapBatch.length >= sitemapBatchSize) {
+         await SitemapFile.insertMany(sitemapBatch, { ordered: false }).catch(() => {});
+         stats.sitemaps += sitemapBatch.length;
+         sitemapBatch = [];
+       }
+    }
+    if (sitemapBatch.length > 0) {
+      await SitemapFile.insertMany(sitemapBatch, { ordered: false }).catch(() => {});
+      stats.sitemaps += sitemapBatch.length;
+    }
+
+    // Process URLs second
+    const urlStream = fs.createReadStream(filePath, { encoding: 'utf8' })
+      .pipe(JSONStream.parse('urls.*'));
+    
+    const urlBatchSize = 2000; // Larger batch for URLs
+    let urlBatch = [];
+
+    for await (const doc of urlStream) {
+      delete doc._id;
+      urlBatch.push(doc);
+      if (urlBatch.length >= urlBatchSize) {
+        await SitemapUrl.insertMany(urlBatch, { ordered: false }).catch(() => {});
+        stats.urls += urlBatch.length;
+        urlBatch = [];
+      }
+    }
+    if (urlBatch.length > 0) {
+      await SitemapUrl.insertMany(urlBatch, { ordered: false }).catch(() => {});
+      stats.urls += urlBatch.length;
+    }
+
+    // Clean up temp file
+    fs.unlinkSync(filePath);
+
+    res.json({ success: true, message: `Restore complete. Imported ${stats.sitemaps} sitemaps and ${stats.urls} URLs.` });
+
+  } catch (error) {
+    console.error('Restore error:', error);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    res.status(500).json({ error: 'Restore failed: ' + error.message });
+  }
+});
+
+
+app.listen(port, () => {
+  console.log(`Backend server listening at http://localhost:${port}`);
+});
